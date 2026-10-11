@@ -4,6 +4,8 @@ import asyncio
 import logging
 
 from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
@@ -221,11 +223,14 @@ def _build_operator_lead_text(detail):
             "direct_post_url"
         )
 
-        channel_url = source.get(
-            "channel_url"
+        source_is_active = source.get(
+            "source_is_active"
         )
 
-        if direct_url:
+        if (
+            direct_url
+            and source_is_active
+        ):
             lines.extend(
                 [
                     "🔗 پست اصلی منبع:",
@@ -233,17 +238,10 @@ def _build_operator_lead_text(detail):
                 ]
             )
 
-        elif channel_url:
-            lines.extend(
-                [
-                    "🔗 کانال منبع:",
-                    channel_url,
-                ]
-            )
-
         else:
             lines.append(
-                "🔗 لینک منبع: ثبت نشده"
+                "🔗 پست اصلی منبع: "
+                "از دکمه زیر بررسی کنید"
             )
 
     else:
@@ -252,6 +250,142 @@ def _build_operator_lead_text(detail):
         )
 
     return "\n".join(lines)
+
+def _build_operator_source_keyboard(
+    property_id: int,
+):
+    source = get_operator_source_context(
+        property_id
+    )
+
+    direct_url = (
+        source.get("direct_post_url")
+        if source
+        else None
+    )
+
+    source_is_active = (
+        bool(source.get("source_is_active"))
+        if source
+        else False
+    )
+
+    if (
+        source_is_active
+        and direct_url
+    ):
+        button = InlineKeyboardButton(
+            "🔗 مشاهده پست اصلی منبع",
+            url=direct_url,
+        )
+
+    else:
+        button = InlineKeyboardButton(
+            "🔗 مشاهده پست اصلی منبع",
+            callback_data=(
+                f"visitsrc_{int(property_id)}"
+            ),
+        )
+
+    return InlineKeyboardMarkup(
+        [[button]]
+    )
+
+
+async def handle_visit_source_callback(
+    update,
+    context,
+):
+    query = update.callback_query
+
+    if not query:
+        return
+
+    action = query.data or ""
+
+    if not action.startswith(
+        "visitsrc_"
+    ):
+        return
+
+    try:
+        property_id = int(
+            action.replace(
+                "visitsrc_",
+                "",
+                1,
+            )
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        await query.answer(
+            "لینک منبع نامعتبر است.",
+            show_alert=True,
+        )
+        return
+
+    source = get_operator_source_context(
+        property_id
+    )
+
+    direct_url = (
+        source.get("direct_post_url")
+        if source
+        else None
+    )
+
+    source_is_active = (
+        bool(source.get("source_is_active"))
+        if source
+        else False
+    )
+
+    if (
+        source_is_active
+        and direct_url
+    ):
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "🔗 مشاهده پست اصلی منبع",
+                                url=direct_url,
+                            )
+                        ]
+                    ]
+                )
+            )
+
+            await query.answer(
+                "لینک پست منبع بازیابی شد؛ "
+                "دوباره دکمه را بزنید."
+            )
+
+        except Exception:
+            logging.exception(
+                "Could not restore visit source button: "
+                "property_id=%s",
+                property_id,
+            )
+
+            await query.answer(
+                "لینک پست منبع بازیابی شد؛ "
+                "اعلان را دوباره باز کنید.",
+                show_alert=True,
+            )
+
+        return
+
+    await query.answer(
+        "این واحد از کانال منبع حذف شده.",
+        show_alert=True,
+    )
+
 
 async def _notify_visit_operators(
     bot,
@@ -327,6 +461,13 @@ async def _notify_visit_operators(
                 chat_id=operator_chat_id,
                 text=lead_text,
                 disable_web_page_preview=True,
+                reply_markup=(
+                    _build_operator_source_keyboard(
+                        property_id
+                    )
+                    if property_id
+                    else None
+                ),
             )
 
             file_sent = False

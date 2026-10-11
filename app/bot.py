@@ -24,6 +24,7 @@ from scheduler import start_scheduler
 from visit_flow import (
     handle_visit_start,
     handle_visit_contact,
+    handle_visit_source_callback,
     start_visit_notification_worker,
 )
 
@@ -15478,8 +15479,16 @@ def main():
 
     app.add_handler(
         CallbackQueryHandler(
+            handle_visit_source_callback,
+            pattern=r"^visitsrc_",
+        ),
+        group=-2,
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
             button_handler,
-            pattern=r"^(?!catnav_|regcat_)",
+            pattern=r"^(?!catnav_|regcat_|visitsrc_)",
         ),
         group=0,
     )
