@@ -1,0 +1,33 @@
+name: Deploy Production
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: realestate-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy real-estate bot
+    runs-on: [self-hosted, Linux, X64, nimatmelk-production]
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out approved main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          clean: true
+          persist-credentials: false
+
+      - name: Validate source
+        run: |
+          python3 -m compileall -q app
+          python3 smoke_test.py
+
+      - name: Deploy through restricted root wrapper
+        run: sudo /usr/local/sbin/deploy-realestate-bot
