@@ -9,6 +9,10 @@ NAMES = (
     "shahfile_smart.py",
     "customer_showcase.py",
     "crm_panel.py",
+    "property_parser.py",
+    "publisher.py",
+    "visit_flow.py",
+    "visit_leads.py",
 )
 
 files = {}
@@ -22,6 +26,10 @@ ai = files["shahfile_ai.py"]
 smart = files["shahfile_smart.py"]
 showcase = files["customer_showcase.py"]
 crm = files["crm_panel.py"]
+parser = files["property_parser.py"]
+publisher = files["publisher.py"]
+visit_flow = files["visit_flow.py"]
+visit_leads = files["visit_leads.py"]
 
 checks = {
     "manager_buttons": all(
@@ -86,6 +94,33 @@ checks = {
             "is_active=False",
         )
     ),
+    "colloquial_decimal_price": all(
+        value in parser
+        for value in (
+            "colloquial = re.search(",
+            'r"(\\d{1,3})\\s*تومان"',
+            'return billions + (millions / Decimal("1000"))',
+        )
+    ),
+    "publish_status_column": (
+        'if row[-2] != "ACTIVE":' in publisher
+        and 'if row[-1] != "ACTIVE":' not in publisher
+    ),
+    "visit_notification_retry": all(
+        value in visit_flow
+        for value in (
+            "start_visit_notification_worker",
+            "run_pending_visit_notifications",
+            "visit_notification_retry_task",
+        )
+    ) and all(
+        value in visit_leads
+        for value in (
+            "get_unnotified_visit_request_ids",
+            "notified_at IS NULL",
+            "receive_visit_request_notifications",
+        )
+    ) and "start_visit_notification_worker(application)" in bot,
 }
 
 missing = [key for key, passed in checks.items() if not passed]
@@ -93,3 +128,8 @@ if missing:
     raise SystemExit("missing checks: " + ", ".join(missing))
 
 print("ADVANCED_SMART_SEARCH_V2_SMOKE_OK")
+
+from app.property_parser import parse_price_billion
+
+if str(parse_price_billion("قیمت کل: ۵ میلیارد ۶۰۰ تومان")) != "5.6":
+    raise SystemExit("colloquial decimal price regression")
