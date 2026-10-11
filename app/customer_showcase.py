@@ -2259,10 +2259,10 @@ def campaign_summary_rows(
                     s.campaign_name,
                     s.query_text,
                     s.is_active,
-                    COUNT(v.id) FILTER (
+                    COUNT(DISTINCT v.id) FILTER (
                         WHERE v.is_active = TRUE
                     ) AS active_customers,
-                    COUNT(v.id) AS total_customers,
+                    COUNT(DISTINCT v.id) AS total_customers,
                     COUNT(d.id) FILTER (
                         WHERE d.delivery_status = 'SENT'
                     ) AS sent_files
