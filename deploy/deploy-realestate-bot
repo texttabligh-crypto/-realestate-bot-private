@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+SOURCE="/opt/idris-github-runner/_work/-realestate-bot-private/-realestate-bot-private"
+TARGET="/opt/realestate-bot"
+BACKUP_ROOT="${TARGET}/backups"
+LOCK_FILE="/run/lock/realestate-bot-deploy.lock"
+
+exec 9>"${LOCK_FILE}"
+flock -n 9 || {
+    echo "ERROR: another real-estate deployment is already running"
+    exit 1
+}
+
+for required in     "${SOURCE}/app/bot.py"     "${SOURCE}/app/requirements.txt"     "${SOURCE}/smoke_test.py"     "${TARGET}/docker-compose.yml"     "${TARGET}/.env"
+do
+    test -f "${required}" || {
+        echo "ERROR: required file is missing: ${required}"
+        exit 1
+    }
+done
+
+if find "${SOURCE}/app" -type l -print -quit | grep -q .; then
+    echo "ERROR: symlinks are not allowed in deployment source"
+    exit 1
+fi
+
+STAMP="$(date -u +%Y%m%d_%H%M%S)"
+BACKUP_DIR="${BACKUP_ROOT}/github_deploy_${STAMP}"
+install -d -m 700 "${BACKUP_DIR}"
+
+rsync -a "${TARGET}/app/" "${BACKUP_DIR}/app/"
+install -m 600 "${TARGET}/smoke_test.py" "${BACKUP_DIR}/smoke_test.py"
+sha256sum "${TARGET}/app/bot.py" > "${BACKUP_DIR}/bot_before.sha256"
+
+rollback() {
+    local exit_code=$?
+    trap - ERR
+    set +e
+
+    echo "ROLLBACK: restoring ${BACKUP_DIR}"
+    rsync -a --delete "${BACKUP_DIR}/app/" "${TARGET}/app/"
+    install -m 644 "${BACKUP_DIR}/smoke_test.py" "${TARGET}/smoke_test.py"
+
+    cd "${TARGET}"
+    docker compose build bot
+    docker compose up -d --no-deps bot
+
+    echo "ROLLBACK_COMPLETE: original exit code ${exit_code}"
+    exit "${exit_code}"
+}
+trap rollback ERR
+
+rsync -a     --include='*/'     --include='*.py'     --include='requirements.txt'     --include='fonts/***'     --exclude='*'     "${SOURCE}/app/" "${TARGET}/app/"
+
+install -m 644 "${SOURCE}/smoke_test.py" "${TARGET}/smoke_test.py"
+
+python3 -m compileall -q "${TARGET}/app"
+
+cd "${TARGET}"
+docker compose build bot
+docker compose up -d --no-deps bot
+
+healthy=0
+for _ in $(seq 1 15); do
+    if docker inspect -f '{{.State.Running}}' realestate_bot 2>/dev/null | grep -qx true        && docker compose logs --since 2m bot 2>&1 | grep -q "Application started"; then
+        healthy=1
+        break
+    fi
+    sleep 2
+done
+
+test "${healthy}" -eq 1
+
+sha256sum "${TARGET}/app/bot.py" | tee "${BACKUP_DIR}/bot_after.sha256"
+docker compose ps bot
+docker compose logs --tail=30 bot
+
+trap - ERR
+echo "DEPLOY_SUCCESS"
+echo "BACKUP=${BACKUP_DIR}"
