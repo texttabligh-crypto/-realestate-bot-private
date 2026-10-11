@@ -127,9 +127,9 @@ missing = [key for key, passed in checks.items() if not passed]
 if missing:
     raise SystemExit("missing checks: " + ", ".join(missing))
 
-print("ADVANCED_SMART_SEARCH_V2_SMOKE_OK")
-
 from app.property_parser import parse_price_billion
 
 if str(parse_price_billion("قیمت کل: ۵ میلیارد ۶۰۰ تومان")) != "5.6":
     raise SystemExit("colloquial decimal price regression")
+
+print("ADVANCED_SMART_SEARCH_V2_SMOKE_OK")
