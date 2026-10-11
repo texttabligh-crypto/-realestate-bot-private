@@ -24,6 +24,7 @@ from scheduler import start_scheduler
 from visit_flow import (
     handle_visit_start,
     handle_visit_contact,
+    start_visit_notification_worker,
 )
 
 from crm_panel import (
@@ -8533,6 +8534,7 @@ async def post_init(application):
     ensure_smart_schema()
     ensure_showcase_schema()
     start_visit_reminder_worker(application)
+    start_visit_notification_worker(application)
     start_search_watch_worker(application)
     start_footer_bulk_refresh_worker(application)
     start_scheduler(application)

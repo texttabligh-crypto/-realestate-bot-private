@@ -904,6 +904,26 @@ def parse_price_billion(text: str):
         millions = Decimal(combo.group(2))
         return billions + (millions / Decimal("1000"))
 
+    # Source channels sometimes omit the word "million" and write:
+    #   5 billion 600 toman
+    # In real-estate captions this means 5.600 billion, not 5 billion
+    # plus 600 toman. Keep the required "toman" suffix so unrelated
+    # measurements are not interpreted as a price fraction.
+    colloquial = re.search(
+        r"(?<![\d/\.,])"
+        r"(\d+)\s*میلیارد\s*(?:و\s*)?"
+        r"(\d{1,3})\s*تومان"
+        r"(?!\s*(?:متر|متری))",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if colloquial:
+        billions = Decimal(colloquial.group(1))
+        fraction_text = colloquial.group(2)
+        millions = Decimal(fraction_text)
+        return billions + (millions / Decimal("1000"))
+
     # 2) Fractional billion values written with separators.
     #    Examples:
     #    15/750 میلیارد  -> 15.750

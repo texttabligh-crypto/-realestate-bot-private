@@ -712,7 +712,10 @@ async def publish_property(bot, property_id):
             f"Property {property_id} not found"
         )
 
-    if row[-1] != "ACTIVE":
+    # get_property_for_publish returns (..., status, source_kind).
+    # The previous code checked row[-1] (source_kind), causing every
+    # MANUAL/TELEGRAM/CUSTOMER file to fail after a valid preview.
+    if row[-2] != "ACTIVE":
         raise RuntimeError(
             f"Property {property_id} is not ACTIVE"
         )

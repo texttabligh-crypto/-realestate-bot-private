@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from telegram import (
@@ -23,6 +24,7 @@ from visit_leads import (
     get_operator_source_context,
     get_visit_operator_telegram_ids,
     get_visit_request_detail,
+    get_unnotified_visit_request_ids,
     get_visitable_property,
     mark_visit_notified,
     save_customer_phone,
@@ -393,6 +395,76 @@ async def _notify_visit_operators(
         )
 
     return successful_operators
+
+
+async def run_pending_visit_notifications(
+    application,
+):
+    request_ids = get_unnotified_visit_request_ids(
+        limit=50
+    )
+
+    for request_id in request_ids:
+        if visit_request_is_notified(request_id):
+            continue
+
+        delivered = await _notify_visit_operators(
+            application.bot,
+            request_id,
+        )
+
+        logging.info(
+            "Visit notification retry processed: "
+            "request_id=%s operators=%s",
+            request_id,
+            delivered,
+        )
+
+
+async def _visit_notification_retry_loop(
+    application,
+):
+    logging.info(
+        "Visit request notification retry worker started."
+    )
+
+    while True:
+        try:
+            await run_pending_visit_notifications(
+                application
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception(
+                "Visit notification retry worker error"
+            )
+
+        await asyncio.sleep(30)
+
+
+def start_visit_notification_worker(
+    application,
+):
+    existing = application.bot_data.get(
+        "visit_notification_retry_task"
+    )
+
+    if existing and not existing.done():
+        return existing
+
+    task = asyncio.create_task(
+        _visit_notification_retry_loop(
+            application
+        ),
+        name="visit_notification_retry",
+    )
+
+    application.bot_data[
+        "visit_notification_retry_task"
+    ] = task
+
+    return task
 
 
 async def _complete_visit_request(
