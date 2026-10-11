@@ -160,14 +160,26 @@ def ensure_smart_schema():
                 CREATE TABLE IF NOT EXISTS customer_purchase_profiles (
                     customer_id BIGINT PRIMARY KEY
                         REFERENCES customer_profiles(id) ON DELETE CASCADE,
-                    funding_status VARCHAR(20) NOT NULL,
+                    funding_status VARCHAR(20),
                     asked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    answered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    answered_at TIMESTAMPTZ,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     CONSTRAINT customer_purchase_profiles_status_check CHECK (
                         funding_status IN ('CASH','SELL_PROPERTY')
                     )
                 )
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE customer_purchase_profiles
+                ALTER COLUMN funding_status DROP NOT NULL
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE customer_purchase_profiles
+                ALTER COLUMN answered_at DROP NOT NULL
                 """
             )
             cur.execute(
@@ -1072,17 +1084,54 @@ def set_customer_funding_status(customer_id, funding_status):
 
 
 async def ask_finance_once(bot, telegram_user_id, customer_id):
-    """Ask the purchase-funding question only for the customer's first visit."""
-    if get_customer_funding_status(customer_id):
+    """Ask exactly once, even if the visit is approved before the answer."""
+    if not customer_id:
         return False
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO customer_purchase_profiles(
+                    customer_id,funding_status,asked_at,answered_at,updated_at
+                )
+                VALUES (%s,NULL,NOW(),NULL,NOW())
+                ON CONFLICT (customer_id) DO NOTHING
+                RETURNING customer_id
+                """,
+                (customer_id,),
+            )
+            inserted = cur.fetchone()
+        conn.commit()
+
+    if not inserted:
+        return False
+
     set_conversation(telegram_user_id, "FINANCE_QUESTION", {}, customer_id=customer_id)
-    await bot.send_message(
-        chat_id=telegram_user_id,
-        text=(
-            "برای خرید این ملک، سرمایه‌تون نقده یا برای خرید باید ملک فعلی‌تون رو بفروشید؟"
-        ),
-        reply_markup=_finance_keyboard(),
-    )
+
+    try:
+        await bot.send_message(
+            chat_id=telegram_user_id,
+            text=(
+                "برای خرید این ملک، سرمایه‌تون نقده یا برای خرید باید ملک فعلی‌تون رو بفروشید؟"
+            ),
+            reply_markup=_finance_keyboard(),
+        )
+    except Exception:
+        # A failed Telegram send must not permanently suppress the first question.
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM customer_purchase_profiles
+                    WHERE customer_id=%s
+                      AND funding_status IS NULL
+                    """,
+                    (customer_id,),
+                )
+            conn.commit()
+        raise
+
     return True
 
 
