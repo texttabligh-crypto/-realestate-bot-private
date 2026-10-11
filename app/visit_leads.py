@@ -556,7 +556,10 @@ def get_visit_operator_telegram_ids():
                     FROM users u
                     JOIN user_permissions up ON up.user_id = u.id
                     WHERE u.is_active = TRUE
-                      AND up.permission_key = 'receive_visit_requests'
+                      AND up.permission_key IN (
+                          'receive_visit_requests',
+                          'receive_visit_request_notifications'
+                      )
                       AND up.is_allowed = TRUE
 
                     UNION
@@ -626,6 +629,45 @@ def visit_request_is_notified(
                 and row[0] is not None
             )
 
+
+
+def get_unnotified_visit_request_ids(
+    limit: int = 50,
+):
+    """
+    Return recent requests whose operator notification was not delivered.
+
+    Immediate delivery remains the fast path. This list is consumed by a
+    background retry worker after a short grace period, so a temporary
+    Telegram/network/recipient failure cannot silently lose a lead.
+    """
+    safe_limit = max(1, min(int(limit or 50), 200))
+
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM visit_requests
+                WHERE notified_at IS NULL
+                  AND status IN (
+                      'NEW',
+                      'CONTACTED',
+                      'SCHEDULED'
+                  )
+                  AND requested_at >= NOW() - INTERVAL '3 days'
+                  AND requested_at <= NOW() - INTERVAL '30 seconds'
+                ORDER BY requested_at, id
+                LIMIT %s
+                """,
+                (safe_limit,),
+            )
+
+            return [
+                row[0]
+                for row in cur.fetchall()
+                if row and row[0]
+            ]
 
 
 # =========================================================
