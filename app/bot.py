@@ -3677,6 +3677,7 @@ def record_category_post(
     hashtag,
     rows,
     created_by_user_id=None,
+    is_active=True,
 ):
     with db_connect() as conn:
         with conn.cursor() as cur:
@@ -3704,7 +3705,7 @@ def record_category_post(
                     %s,
                     %s,
                     %s,
-                    TRUE
+                    %s
                 )
                 RETURNING id
                 """,
@@ -3716,6 +3717,7 @@ def record_category_post(
                     telegram_message_id,
                     hashtag,
                     created_by_user_id,
+                    bool(is_active),
                 ),
             )
 
@@ -3757,6 +3759,39 @@ def record_category_post(
             conn.commit()
 
             return category_post_id
+
+
+def activate_category_post_delivery(
+    category_post_id,
+    destination_channel_id,
+    telegram_message_id,
+):
+    """Finalize a reserved category after Telegram accepts the post."""
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE category_posts
+                SET
+                    telegram_channel_id = %s,
+                    telegram_message_id = %s,
+                    is_active = TRUE,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (
+                    destination_channel_id,
+                    telegram_message_id,
+                    category_post_id,
+                ),
+            )
+
+            if cur.rowcount != 1:
+                raise RuntimeError(
+                    "Reserved category post could not be activated"
+                )
+
+            conn.commit()
 
 
 WEEKDAY_NAMES = {
@@ -13759,27 +13794,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⏳ در حال ارسال دسته‌بندی به کانال..."
         )
 
-        try:
-            sent = await context.bot.send_message(
-                chat_id=destination_channel_id,
-                text=category_text,
-                disable_web_page_preview=True,
-            )
+        sent = None
+        category_post_id = None
 
+        try:
             hashtag = build_category_hashtag(
                 low,
                 high,
             )
 
+            # Reserve the database id first so the very first Telegram
+            # send can already contain working callback data. The row
+            # remains inactive until Telegram confirms delivery.
             category_post_id = record_category_post(
                 low=low,
                 high=high,
                 offset=offset,
                 destination_channel_id=destination_channel_id,
-                telegram_message_id=sent.message_id,
+                telegram_message_id=0,
                 hashtag=hashtag,
                 rows=page_rows,
                 created_by_user_id=session[0],
+                is_active=False,
             )
 
             navigation_keyboard = (
@@ -13791,20 +13827,50 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             )
 
-            if navigation_keyboard:
-                await _edit_category_message_with_retry(
-                    context.bot,
-                    chat_id=destination_channel_id,
-                    message_id=sent.message_id,
-                    text=category_text,
-                    reply_markup=navigation_keyboard,
-                )
+            sent = await context.bot.send_message(
+                chat_id=destination_channel_id,
+                text=category_text,
+                reply_markup=navigation_keyboard,
+                disable_web_page_preview=True,
+            )
+
+            activate_category_post_delivery(
+                category_post_id,
+                destination_channel_id,
+                sent.message_id,
+            )
 
         except Exception as exc:
             logging.exception(
                 "Category publish failed: %s",
                 exc,
             )
+
+            # Never leave a visible but unusable category post behind.
+            if sent is not None:
+                try:
+                    await context.bot.delete_message(
+                        chat_id=destination_channel_id,
+                        message_id=sent.message_id,
+                    )
+                except Exception:
+                    logging.exception(
+                        "Could not remove incomplete category post: "
+                        "message_id=%s",
+                        sent.message_id,
+                    )
+
+            if category_post_id is not None:
+                try:
+                    deactivate_category_post(
+                        category_post_id
+                    )
+                except Exception:
+                    logging.exception(
+                        "Could not deactivate incomplete category post: "
+                        "category_post_id=%s",
+                        category_post_id,
+                    )
 
             await query.edit_message_text(
                 "❌ ارسال دسته‌بندی ناموفق بود.\n\n"

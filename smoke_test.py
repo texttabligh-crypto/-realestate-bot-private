@@ -81,7 +81,9 @@ checks = {
             "if total <= 0:",
             'f"صفحه {current_page} از {total_pages}"',
             "total=len(all_rows)",
-            "await _edit_category_message_with_retry(",
+            "reply_markup=navigation_keyboard",
+            "activate_category_post_delivery(",
+            "is_active=False",
         )
     ),
 }
