@@ -681,6 +681,15 @@ async def _complete_visit_request(
         reply_markup=ReplyKeyboardRemove(),
     )
 
+    # Ask this qualification question only on the customer's first visit.
+    if update.effective_user:
+        from shahfile_smart import ask_finance_once
+        await ask_finance_once(
+            context.bot,
+            update.effective_user.id,
+            customer_id,
+        )
+
 
 async def handle_visit_start(
     update,
