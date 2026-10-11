@@ -15,7 +15,12 @@ flock -n 9 || {
     exit 1
 }
 
-for required in     "${SOURCE}/app/bot.py"     "${SOURCE}/app/requirements.txt"     "${SOURCE}/smoke_test.py"     "${TARGET}/docker-compose.yml"     "${TARGET}/.env"
+for required in \
+    "${SOURCE}/app/bot.py" \
+    "${SOURCE}/app/requirements.txt" \
+    "${SOURCE}/smoke_test.py" \
+    "${TARGET}/docker-compose.yml" \
+    "${TARGET}/.env"
 do
     test -f "${required}" || {
         echo "ERROR: required file is missing: ${required}"
@@ -33,7 +38,12 @@ BACKUP_DIR="${BACKUP_ROOT}/github_deploy_${STAMP}"
 install -d -m 700 "${BACKUP_DIR}"
 
 rsync -a "${TARGET}/app/" "${BACKUP_DIR}/app/"
-install -m 600 "${TARGET}/smoke_test.py" "${BACKUP_DIR}/smoke_test.py"
+SMOKE_TEST_EXISTED=0
+if test -f "${TARGET}/smoke_test.py"; then
+    install -m 600 "${TARGET}/smoke_test.py" "${BACKUP_DIR}/smoke_test.py"
+    SMOKE_TEST_EXISTED=1
+fi
+printf '%s\n' "${SMOKE_TEST_EXISTED}" > "${BACKUP_DIR}/smoke_test_existed"
 sha256sum "${TARGET}/app/bot.py" > "${BACKUP_DIR}/bot_before.sha256"
 
 rollback() {
@@ -43,7 +53,11 @@ rollback() {
 
     echo "ROLLBACK: restoring ${BACKUP_DIR}"
     rsync -a --delete "${BACKUP_DIR}/app/" "${TARGET}/app/"
-    install -m 644 "${BACKUP_DIR}/smoke_test.py" "${TARGET}/smoke_test.py"
+    if test "$(cat "${BACKUP_DIR}/smoke_test_existed")" = "1"; then
+        install -m 644 "${BACKUP_DIR}/smoke_test.py" "${TARGET}/smoke_test.py"
+    else
+        rm -f -- "${TARGET}/smoke_test.py"
+    fi
 
     cd "${TARGET}"
     docker compose build bot
@@ -54,7 +68,13 @@ rollback() {
 }
 trap rollback ERR
 
-rsync -a     --include='*/'     --include='*.py'     --include='requirements.txt'     --include='fonts/***'     --exclude='*'     "${SOURCE}/app/" "${TARGET}/app/"
+rsync -a \
+    --include='*/' \
+    --include='*.py' \
+    --include='requirements.txt' \
+    --include='fonts/***' \
+    --exclude='*' \
+    "${SOURCE}/app/" "${TARGET}/app/"
 
 install -m 644 "${SOURCE}/smoke_test.py" "${TARGET}/smoke_test.py"
 
@@ -66,7 +86,8 @@ docker compose up -d --no-deps bot
 
 healthy=0
 for _ in $(seq 1 15); do
-    if docker inspect -f '{{.State.Running}}' realestate_bot 2>/dev/null | grep -qx true        && docker compose logs --since 2m bot 2>&1 | grep -q "Application started"; then
+    if docker inspect -f '{{.State.Running}}' realestate_bot 2>/dev/null | grep -qx true \
+        && docker compose logs --since 2m bot 2>&1 | grep -q "Application started"; then
         healthy=1
         break
     fi
