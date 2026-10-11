@@ -1967,7 +1967,7 @@ async def handle_customer_text(update, context):
         customer_id = save_customer_phone(user.id, phone) or customer_id
         from customer_showcase import complete_showcase_registration
         return await complete_showcase_registration(
-            update, context, user, customer_id, payload
+            update, context, payload.get("showcase_token") or ""
         )
 
     if state == "VISIT_PHONE":
@@ -2244,7 +2244,7 @@ async def handle_customer_contact(update, context):
     if state == "SHOWCASE_PHONE":
         from customer_showcase import complete_showcase_registration
         return await complete_showcase_registration(
-            update, context, user, customer_id, payload
+            update, context, payload.get("showcase_token") or ""
         )
     prefilled_dt = parse_shamsi_visit_datetime(payload.get("visit_datetime_jalali") or "")
     if prefilled_dt and prefilled_dt > datetime.now(TEHRAN):
