@@ -85,6 +85,8 @@ from customer_showcase import (
     build_showcase_link,
     handle_showcase_start,
     handle_showcase_callback,
+    start_campaign_watch_worker,
+    campaign_summary_text,
 )
 
 from ingest import (
@@ -6988,13 +6990,12 @@ def smart_search_keyboard(result, raw_query=None):
         ],
     ])
 
-    if total > 0:
-        rows.append(
-            [InlineKeyboardButton(
-                "🔗 ساخت لینک اختصاصی مشتری",
-                callback_data="customer_showcase_create",
-            )]
-        )
+    rows.append(
+        [InlineKeyboardButton(
+            "🔗 ساخت لینک جذب مشتری",
+            callback_data="customer_showcase_create",
+        )]
+    )
 
     rows.append(
         [
@@ -8534,6 +8535,7 @@ async def post_init(application):
     ensure_footer_bulk_refresh_schema()
     ensure_smart_schema()
     ensure_showcase_schema()
+    start_campaign_watch_worker(application)
     start_visit_reminder_worker(application)
     start_visit_notification_worker(application)
     start_search_watch_worker(application)
@@ -11950,6 +11952,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id, username, display_name, role = session
     action = query.data
 
+    if action == "customer_campaigns":
+        await query.edit_message_text(
+            campaign_summary_text(session[0]),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🔍 جستجو و ساخت کمپین جدید",
+                    callback_data="smart_search",
+                )],
+                [InlineKeyboardButton(
+                    "⬅️ منوی اصلی",
+                    callback_data="home",
+                )],
+            ]),
+        )
+        return
+
     if action == "customer_showcase_create":
         raw_query = context.user_data.get("smart_search_query")
         if not raw_query:
@@ -11967,23 +11985,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if not showcase:
             await query.edit_message_text(
-                "⚠️ برای این جستجو فایل فعالی وجود ندارد و لینک ساخته نشد.",
+                "⚠️ فیلتر معتبری برای ساخت کمپین پیدا نشد. دوباره جستجو کنید.",
                 reply_markup=back_menu(),
             )
             return
         link = await build_showcase_link(context.bot, showcase["token"])
-        expires = showcase["expires_at"].astimezone(
-            ZoneInfo("Asia/Tehran")
-        ).strftime("%Y/%m/%d %H:%M")
         await query.message.reply_text(
-            "✅ لینک اختصاصی مشتری ساخته شد\n\n"
+            "✅ لینک جذب مشتری ساخته شد\n\n"
             f"🔎 درخواست: {smart_search_display_query(raw_query)}\n"
-            f"📂 تعداد فایل اولیه: {showcase['count']}\n"
-            f"⏳ اعتبار تا: {expires}\n\n"
+            f"📂 فایل‌های فعال فعلی: {showcase['count']}\n\n"
             f"{link}\n\n"
-            "این ویترین ثابت است؛ فایل حذف‌شده از آن کنار می‌رود، "
-            "اما فایل جدید به لیست اضافه نمی‌شود و فقط در صورت فعال‌کردن "
-            "اعلان، جداگانه برای مشتری ارسال خواهد شد.",
+            "مشتری فقط بار اول شماره‌اش را ثبت می‌کند و بعد فهرست زنده و "
+            "صفحه‌بندی‌شده را می‌بیند. فایل حذف‌شده خودکار کنار می‌رود و "
+            "هر فایل جدیدِ مطابق همین فیلتر با صف هوشمند فوراً ارسال می‌شود.",
             disable_web_page_preview=True,
         )
         return
@@ -13428,7 +13442,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• 3 خواب باغمیشه\n"
             "• باغمیشه 120 متر 5 تا 18 میلیارد\n"
             "• طبقه پنجم",
-            reply_markup=back_menu(),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "👥 کمپین‌های جذب مشتری",
+                    callback_data="customer_campaigns",
+                )],
+                [InlineKeyboardButton(
+                    "⬅️ بازگشت",
+                    callback_data="home",
+                )],
+            ]),
         )
         return
 
