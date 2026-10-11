@@ -748,20 +748,235 @@ async def build_visit_keyboard_for_bot(
 # OPERATOR SOURCE CONTEXT
 # =========================================================
 
+def _clean_source_username(
+    value,
+):
+    if not value:
+        return None
+
+    username = (
+        str(value)
+        .strip()
+        .lstrip("@")
+    )
+
+    return username or None
+
+
+def _direct_source_post_url(
+    source_post_url,
+    username,
+    telegram_channel_id,
+    source_message_id,
+):
+    """
+    Return only a URL that points to one concrete Telegram post.
+
+    A channel root such as https://t.me/channel is deliberately
+    rejected; visit leads must never send operators to a generic
+    channel page.
+    """
+
+    try:
+        message_id = int(
+            source_message_id
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        message_id = None
+
+    raw_url = str(
+        source_post_url or ""
+    ).strip()
+
+    if re.match(
+        r"^https?://(?:t\.me|telegram\.me)/"
+        r"(?:c/\d+|[A-Za-z0-9_]+)/\d+"
+        r"(?:[/?#].*)?$",
+        raw_url,
+        flags=re.IGNORECASE,
+    ):
+        return raw_url
+
+    if not message_id:
+        return None
+
+    if username:
+        return (
+            f"https://t.me/{username}/"
+            f"{message_id}"
+        )
+
+    channel_id = str(
+        telegram_channel_id or ""
+    ).strip()
+
+    if channel_id.startswith("-100"):
+        private_channel_id = (
+            channel_id[4:]
+        )
+
+        if private_channel_id.isdigit():
+            return (
+                "https://t.me/c/"
+                f"{private_channel_id}/"
+                f"{message_id}"
+            )
+
+    return None
+
+
+def _source_context_from_row(
+    source,
+):
+    source_unit_code = source[0]
+    source_post_url = source[1]
+    source_message_id = source[2]
+    source_title = source[4]
+    username = _clean_source_username(
+        source[5]
+    )
+    telegram_channel_id = source[6]
+    source_is_active = bool(
+        source[7]
+    )
+
+    direct_post_url = (
+        _direct_source_post_url(
+            source_post_url,
+            username,
+            telegram_channel_id,
+            source_message_id,
+        )
+    )
+
+    channel_url = (
+        f"https://t.me/{username}"
+        if username
+        else None
+    )
+
+    if source_title:
+        source_name = str(
+            source_title
+        ).strip()
+
+    elif username:
+        source_name = (
+            f"@{username}"
+        )
+
+    else:
+        source_name = (
+            "منبع ثبت‌شده"
+        )
+
+    return {
+        "kind": "STRUCTURED",
+        "source_name": source_name,
+        "source_username": username,
+        "source_unit_code": (
+            source_unit_code
+            or None
+        ),
+        "source_message_id": (
+            source_message_id
+            or None
+        ),
+        "source_chat_id": (
+            telegram_channel_id
+            or None
+        ),
+        "source_is_active": (
+            source_is_active
+        ),
+        "direct_post_url": (
+            direct_post_url
+            or None
+        ),
+        "channel_url": (
+            channel_url
+            or None
+        ),
+    }
+
+
+def _find_source_by_identity(
+    username,
+    source_unit_code,
+):
+    """
+    Recover legacy property/source links by the two identifiers
+    already visible in imported text: channel username + source
+    unit code.
+    """
+
+    if (
+        not username
+        or not source_unit_code
+    ):
+        return None
+
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    ps.source_unit_code,
+                    ps.source_post_url,
+                    ps.source_message_id,
+                    ps.source_raw_text,
+                    c.title,
+                    c.username,
+                    c.telegram_channel_id,
+                    ps.is_active,
+                    ps.is_primary
+
+                FROM property_sources ps
+
+                JOIN channels c
+                  ON c.id = ps.source_channel_id
+
+                WHERE LOWER(
+                    REPLACE(
+                        COALESCE(c.username, ''),
+                        '@',
+                        ''
+                    )
+                ) = LOWER(%s)
+                  AND TRIM(
+                      ps.source_unit_code::text
+                  ) = TRIM(%s)
+
+                ORDER BY
+                    ps.is_active DESC,
+                    ps.is_primary DESC,
+                    ps.id DESC
+
+                LIMIT 1
+                """,
+                (
+                    str(username).lstrip("@"),
+                    str(source_unit_code),
+                ),
+            )
+
+            return cur.fetchone()
+
+
 def get_operator_source_context(
     property_id: int,
 ):
     """
-    Prefer structured property_sources.
+    Return a concrete original-post source for operator visit leads.
 
-    For legacy INPUT properties that predate proper source
-    tracking, safely recover:
-      - Telegram channel username
-      - source listing code
-
-    from raw_text.
-
-    We NEVER invent a direct Telegram post URL.
+    Structured property_sources are preferred. Legacy properties are
+    recovered by matching the channel username and source unit code
+    parsed from raw_text. A generic channel URL is never promoted as a
+    direct post URL.
     """
 
     source = get_primary_property_source(
@@ -769,72 +984,9 @@ def get_operator_source_context(
     )
 
     if source:
-        source_unit_code = source[0]
-        source_post_url = source[1]
-        source_message_id = source[2]
-        source_title = source[4]
-        source_username = source[5]
-
-        username = (
-            str(source_username)
-            .strip()
-            .lstrip("@")
-            if source_username
-            else None
+        return _source_context_from_row(
+            source
         )
-
-        direct_post_url = (
-            source_post_url
-        )
-
-        if (
-            not direct_post_url
-            and username
-            and source_message_id
-        ):
-            direct_post_url = (
-                f"https://t.me/{username}/"
-                f"{source_message_id}"
-            )
-
-        channel_url = (
-            f"https://t.me/{username}"
-            if username
-            else None
-        )
-
-        if source_title:
-            source_name = str(
-                source_title
-            ).strip()
-
-        elif username:
-            source_name = (
-                f"@{username}"
-            )
-
-        else:
-            source_name = (
-                "منبع ثبت‌شده"
-            )
-
-        return {
-            "kind": "STRUCTURED",
-            "source_name": source_name,
-            "source_username": username,
-            "source_unit_code": (
-                source_unit_code
-                or None
-            ),
-            "direct_post_url": (
-                direct_post_url
-                or None
-            ),
-            "channel_url": (
-                channel_url
-                or None
-            ),
-        }
 
     # -----------------------------------------------------
     # Legacy fallback from properties.raw_text
@@ -867,9 +1019,6 @@ def get_operator_source_context(
 
     username = None
 
-    # Strongest pattern:
-    # کانال تلگرام
-    # @ChannelUsername
     match = re.search(
         r"کانال\s*تلگرام"
         r"[\s:：\-–—]*"
@@ -881,8 +1030,6 @@ def get_operator_source_context(
     if match:
         username = match.group(1)
 
-    # Fallback: first Telegram-compatible @username.
-    # Instagram handles containing "." won't match.
     if not username:
         match = re.search(
             r"@([A-Za-z0-9_]{5,})",
@@ -908,6 +1055,18 @@ def get_operator_source_context(
     except Exception:
         source_unit_code = None
 
+    recovered_source = (
+        _find_source_by_identity(
+            username,
+            source_unit_code,
+        )
+    )
+
+    if recovered_source:
+        return _source_context_from_row(
+            recovered_source
+        )
+
     if username:
         return {
             "kind": "RAW_TEXT",
@@ -919,6 +1078,9 @@ def get_operator_source_context(
                 source_unit_code
                 or None
             ),
+            "source_message_id": None,
+            "source_chat_id": None,
+            "source_is_active": False,
             "direct_post_url": None,
             "channel_url": (
                 f"https://t.me/{username}"
@@ -939,6 +1101,9 @@ def get_operator_source_context(
             source_unit_code
             or None
         ),
+        "source_message_id": None,
+        "source_chat_id": None,
+        "source_is_active": False,
         "direct_post_url": None,
         "channel_url": None,
     }
