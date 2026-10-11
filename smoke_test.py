@@ -121,6 +121,30 @@ checks = {
             "receive_visit_request_notifications",
         )
     ) and "start_visit_notification_worker(application)" in bot,
+    "visit_source_direct_link": all(
+        value in visit_leads
+        for value in (
+            "_find_source_by_identity",
+            "_direct_source_post_url",
+            "source_is_active",
+            "A channel root such as",
+        )
+    ) and all(
+        value in visit_flow
+        for value in (
+            "_build_operator_source_keyboard",
+            "handle_visit_source_callback",
+            "این واحد از کانال منبع حذف شده.",
+            'callback_data=(',
+        )
+    ) and all(
+        value in bot
+        for value in (
+            "handle_visit_source_callback",
+            'pattern=r"^visitsrc_"',
+            'pattern=r"^(?!catnav_|regcat_|visitsrc_)"',
+        )
+    ),
 }
 
 missing = [key for key, passed in checks.items() if not passed]
