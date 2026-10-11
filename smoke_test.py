@@ -75,6 +75,15 @@ checks = {
     ),
     "permission_guard": "smart_filter_" in crm,
     "clean_showcase_ui": "cs_visit_" not in showcase,
+    "category_single_page_indicator": all(
+        value in bot
+        for value in (
+            "if total <= 0:",
+            'f"صفحه {current_page} از {total_pages}"',
+            "total=len(all_rows)",
+            "await _edit_category_message_with_retry(",
+        )
+    ),
 }
 
 missing = [key for key, passed in checks.items() if not passed]
