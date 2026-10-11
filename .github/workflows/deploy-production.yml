@@ -2,6 +2,9 @@ name: Deploy Production
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
 
 permissions:
   contents: read
@@ -13,6 +16,10 @@ concurrency:
 jobs:
   deploy:
     name: Deploy real-estate bot
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: [self-hosted, Linux, X64, nimatmelk-production]
     timeout-minutes: 20
 
