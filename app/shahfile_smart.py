@@ -156,6 +156,21 @@ def ensure_smart_schema():
                 """
             )
             cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS customer_purchase_profiles (
+                    customer_id BIGINT PRIMARY KEY
+                        REFERENCES customer_profiles(id) ON DELETE CASCADE,
+                    funding_status VARCHAR(20) NOT NULL,
+                    asked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    answered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT customer_purchase_profiles_status_check CHECK (
+                        funding_status IN ('CASH','SELL_PROPERTY')
+                    )
+                )
+                """
+            )
+            cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_smart_visit_status ON smart_visit_approvals(manager_status, created_at)"
             )
             cur.execute(
@@ -1021,15 +1036,54 @@ def _finance_keyboard():
     ])
 
 
-async def _ask_finance(bot, telegram_user_id, customer_id):
+def get_customer_funding_status(customer_id):
+    if not customer_id:
+        return None
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT funding_status FROM customer_purchase_profiles WHERE customer_id=%s",
+                (customer_id,),
+            )
+            row = cur.fetchone()
+    return row[0] if row else None
+
+
+def set_customer_funding_status(customer_id, funding_status):
+    if not customer_id or funding_status not in {"CASH", "SELL_PROPERTY"}:
+        return False
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO customer_purchase_profiles(
+                    customer_id,funding_status,asked_at,answered_at,updated_at
+                )
+                VALUES (%s,%s,NOW(),NOW(),NOW())
+                ON CONFLICT (customer_id) DO UPDATE
+                SET funding_status=EXCLUDED.funding_status,
+                    answered_at=NOW(),
+                    updated_at=NOW()
+                """,
+                (customer_id, funding_status),
+            )
+        conn.commit()
+    return True
+
+
+async def ask_finance_once(bot, telegram_user_id, customer_id):
+    """Ask the purchase-funding question only for the customer's first visit."""
+    if get_customer_funding_status(customer_id):
+        return False
     set_conversation(telegram_user_id, "FINANCE_QUESTION", {}, customer_id=customer_id)
     await bot.send_message(
         chat_id=telegram_user_id,
         text=(
-            "برای خرید این خانه، سرمایه‌تون نقده یا برای خرید باید ملک فعلی‌تون رو بفروشید؟"
+            "برای خرید این ملک، سرمایه‌تون نقده یا برای خرید باید ملک فعلی‌تون رو بفروشید؟"
         ),
         reply_markup=_finance_keyboard(),
     )
+    return True
 
 
 # =========================================================
@@ -1626,6 +1680,7 @@ async def _submit_smart_visit(update, context, user, customer_id, payload, visit
         + ("" if sent else "\nدرخواست داخل سیستم ثبت شده و در صف بررسی مدیر قرار دارد."),
         reply_markup=ReplyKeyboardRemove(),
     )
+    await ask_finance_once(context.bot, user.id, customer_id)
     return True
 
 
@@ -1789,7 +1844,9 @@ async def handle_customer_text(update, context):
     # «70 تا 90 متر تو رشدیه تا 8 میلیارد». Property data itself always
     # comes from our database; AI only extracts intent/filters.
     ai_intent = None
-    if state not in SELLER_STATES and state not in {"VISIT_PHONE", "VISIT_DATETIME", "FINANCE_QUESTION"}:
+    if state not in SELLER_STATES and state not in {
+        "VISIT_PHONE", "VISIT_DATETIME", "FINANCE_QUESTION", "SHOWCASE_PHONE"
+    }:
         ai_intent = await extract_ai_intent(
             text,
             telegram_user_id=user.id,
@@ -1899,6 +1956,20 @@ async def handle_customer_text(update, context):
         await update.message.reply_text(_welcome_text(), reply_markup=_start_choice_keyboard())
         return True
 
+    if state == "SHOWCASE_PHONE":
+        phone = parse_phone(text)
+        if not phone:
+            await update.message.reply_text(
+                "شماره موبایل معتبر نیست. مثل 09121234567 ارسال کنید یا دکمه ارسال شماره تماس رو بزنید.",
+                reply_markup=_contact_keyboard(),
+            )
+            return True
+        customer_id = save_customer_phone(user.id, phone) or customer_id
+        from customer_showcase import complete_showcase_registration
+        return await complete_showcase_registration(
+            update, context, user, customer_id, payload
+        )
+
     if state == "VISIT_PHONE":
         phone = parse_phone(text)
         if not phone:
@@ -1932,10 +2003,15 @@ async def handle_customer_text(update, context):
 
     if state == "FINANCE_QUESTION":
         if "نقد" in text:
+            set_customer_funding_status(customer_id, "CASH")
             clear_conversation(user.id, customer_id)
-            await update.message.reply_text("عالیه ✅ اطلاعات خریدتون ثبت شد. اگر فایل دیگه‌ای می‌خواید، بازه بودجه یا کد واحد رو بفرستید.")
+            await update.message.reply_text(
+                "عالیه ✅ وضعیت خرید شما به‌صورت سرمایه نقدی ثبت شد. "
+                "ادامه هماهنگی بازدید از همین‌جا انجام می‌شود."
+            )
             return True
         if any(k in text for k in ("فروش", "بفروشم", "ملک دارم", "خونه دارم", "خانه دارم")):
+            set_customer_funding_status(customer_id, "SELL_PROPERTY")
             sid = _create_or_reset_submission(customer_id, user.id)
             set_conversation(user.id, "SELL_DISTRICT", {"submission_id": sid}, customer_id=customer_id)
             await update.message.reply_text("📍 محله/منطقه حدودی ملک رو بفرستید.\nمثال: رشدیه-بوستان")
@@ -2154,7 +2230,7 @@ async def handle_customer_contact(update, context):
         return False
     user = update.effective_user
     state, payload, customer_id = get_conversation(user.id)
-    if state != "VISIT_PHONE":
+    if state not in {"VISIT_PHONE", "SHOWCASE_PHONE"}:
         return False
     contact = update.message.contact
     if contact.user_id and contact.user_id != user.id:
@@ -2165,6 +2241,11 @@ async def handle_customer_contact(update, context):
         await update.message.reply_text("شماره تماس معتبر تشخیص داده نشد. لطفاً شماره رو به صورت 09121234567 بفرستید.")
         return True
     customer_id = save_customer_phone(user.id, phone) or customer_id
+    if state == "SHOWCASE_PHONE":
+        from customer_showcase import complete_showcase_registration
+        return await complete_showcase_registration(
+            update, context, user, customer_id, payload
+        )
     prefilled_dt = parse_shamsi_visit_datetime(payload.get("visit_datetime_jalali") or "")
     if prefilled_dt and prefilled_dt > datetime.now(TEHRAN):
         return await _submit_smart_visit(update, context, user, customer_id, payload, prefilled_dt)
@@ -2391,11 +2472,16 @@ async def handle_customer_callback(update, context, session=None):
         return True
 
     if action == "sc_fin_cash":
+        set_customer_funding_status(customer_id, "CASH")
         clear_conversation(user.id, customer_id)
-        await query.edit_message_text("عالیه ✅ سرمایه نقدی ثبت شد. هر زمان فایل دیگه‌ای خواستید، بودجه یا کد واحد رو بفرستید.")
+        await query.edit_message_text(
+            "عالیه ✅ وضعیت خرید شما به‌صورت سرمایه نقدی ثبت شد. "
+            "ادامه هماهنگی بازدید از همین‌جا انجام می‌شود."
+        )
         return True
 
     if action == "sc_fin_sell":
+        set_customer_funding_status(customer_id, "SELL_PROPERTY")
         sid = _create_or_reset_submission(customer_id, user.id)
         set_conversation(user.id, "SELL_DISTRICT", {"submission_id": sid}, customer_id)
         await query.edit_message_text("📍 محله/منطقه حدودی ملک رو بفرستید.\nمثال: رشدیه-بوستان")
@@ -2458,7 +2544,7 @@ async def handle_customer_callback(update, context, session=None):
         owner_id = _owner_user_id()
         detail = _schedule_approved_visit(approval_id, detail[4], owner_id)
         await query.edit_message_text(f"✅ وقت بازدید برای {format_local_dt(detail[4])} قطعی شد.")
-        await _ask_finance(context.bot, user.id, detail[6])
+        await ask_finance_once(context.bot, user.id, detail[6])
         return True
 
     if action.startswith("sc_va_decline_"):
@@ -2512,7 +2598,7 @@ async def _handle_manager_callback(update, context, session, action):
             chat_id=detail[2],
             text=f"✅ ShahFile وقت بازدید شما برای کد {detail[8]} را تأیید کرد.\n🕐 {format_local_dt(detail[3])}",
         )
-        await _ask_finance(context.bot, detail[2], detail[6])
+        await ask_finance_once(context.bot, detail[2], detail[6])
         return True
 
     if action.startswith("sc_mgr_vp_"):
