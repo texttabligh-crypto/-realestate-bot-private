@@ -3402,7 +3402,7 @@ def category_navigation_keyboard(
     page_size = int(page_size or 10)
     offset = max(0, int(offset or 0))
 
-    if total <= page_size:
+    if total <= 0:
         return None
 
     total_pages = (
@@ -3520,6 +3520,8 @@ def build_category_post_text(
     high,
     rows,
     offset=0,
+    total=None,
+    page_size=10,
 ):
     hashtag = build_category_hashtag(
         low,
@@ -3651,12 +3653,18 @@ def build_category_post_text(
             )
             lines.append("")
 
-    # === CATEGORY PAGINATION NOTE V1 ===
-    lines.extend([
-        "",
-        "برای رفتن به صفحه‌های بعدی از دکمه‌های زیر استفاده کنید 👇",
-        "بعد از زدن دکمه، لطفاً چند ثانیه صبر کنید تا صفحه جدید نمایش داده شود.",
-    ])
+    effective_total = (
+        len(rows)
+        if total is None
+        else max(0, int(total))
+    )
+
+    if effective_total > int(page_size or 10):
+        lines.extend([
+            "",
+            "برای رفتن به صفحه‌های بعدی از دکمه‌های زیر استفاده کنید 👇",
+            "بعد از زدن دکمه، لطفاً چند ثانیه صبر کنید تا صفحه جدید نمایش داده شود.",
+        ])
 
     return "\n".join(lines).strip()
 
@@ -6738,6 +6746,8 @@ def smart_search_result_text(
             filters["price_max"],
             category_rows,
             offset=offset,
+            total=total,
+            page_size=limit,
         )
 
     # -------------------------------------------------
@@ -10483,6 +10493,8 @@ async def sync_active_category_posts(
             float(high),
             page_rows,
             offset=offset,
+            total=total,
+            page_size=page_size,
         )
 
         keyboard = (
@@ -13739,6 +13751,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             high,
             page_rows,
             offset=offset,
+            total=len(all_rows),
+            page_size=10,
         )
 
         await query.edit_message_text(
@@ -13778,9 +13792,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             if navigation_keyboard:
-                await context.bot.edit_message_reply_markup(
+                await _edit_category_message_with_retry(
+                    context.bot,
                     chat_id=destination_channel_id,
                     message_id=sent.message_id,
+                    text=category_text,
                     reply_markup=navigation_keyboard,
                 )
 
@@ -14903,6 +14919,8 @@ async def category_navigation_handler(
         float(high),
         page_rows,
         offset=offset,
+        total=total,
+        page_size=page_size,
     )
 
     keyboard = (
