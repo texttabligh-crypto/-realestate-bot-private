@@ -121,6 +121,36 @@ checks = {
             "receive_visit_request_notifications",
         )
     ) and "start_visit_notification_worker(application)" in bot,
+    "live_lead_campaigns": all(
+        value in showcase
+        for value in (
+            "customer_campaign_deliveries",
+            "complete_showcase_registration",
+            "start_campaign_watch_worker",
+            "campaign_summary_text",
+            "SHOWCASE_PHONE",
+            "PENDING",
+            "SENT",
+        )
+    ) and all(
+        value in bot
+        for value in (
+            "start_campaign_watch_worker(application)",
+            "customer_campaigns",
+            "ساخت لینک جذب مشتری",
+        )
+    ),
+    "first_visit_funding_profile": all(
+        value in smart
+        for value in (
+            "customer_purchase_profiles",
+            "ask_finance_once",
+            "set_customer_funding_status",
+            '"CASH"',
+            '"SELL_PROPERTY"',
+            '"SHOWCASE_PHONE"',
+        )
+    ) and "ask_finance_once" in visit_flow,
     "visit_source_direct_link": all(
         value in visit_leads
         for value in (
