@@ -6527,8 +6527,26 @@ _crm_campaign_v4_legacy_handle_text = handle_crm_text
 
 
 def build_main_menu(session, legacy_keyboard):
-    # Keep the main menu compact. Campaign tools live inside CRM.
-    return _crm_campaign_v4_legacy_build_main_menu(session, legacy_keyboard)
+    markup = _crm_campaign_v4_legacy_build_main_menu(session, legacy_keyboard)
+    rows = [list(row) for row in (markup.inline_keyboard if markup else [])]
+    callbacks = {
+        button.callback_data
+        for row in rows
+        for button in row
+        if button.callback_data
+    }
+    if (
+        has_permission(session, "customers_manage")
+        and "crm_campaigns" not in callbacks
+    ):
+        insert_at = max(0, len(rows) - 1)
+        rows.insert(insert_at, [
+            InlineKeyboardButton(
+                "👥 باشگاه مشتریان CRM",
+                callback_data="crm_campaigns",
+            )
+        ])
+    return InlineKeyboardMarkup(rows)
 
 
 def _customers_keyboard(session, offset=0, limit=20):
