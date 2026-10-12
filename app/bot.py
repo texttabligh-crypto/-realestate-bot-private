@@ -27,6 +27,10 @@ from visit_flow import (
     handle_visit_source_callback,
     start_visit_notification_worker,
 )
+from visit_ops_group import (
+    ensure_schema as ensure_visit_ops_schema,
+    handle_connect_command as handle_visit_ops_connect,
+)
 
 from crm_panel import (
     ensure_crm_schema,
@@ -8535,6 +8539,7 @@ async def post_init(application):
         )
 
     ensure_crm_schema()
+    ensure_visit_ops_schema()
     ensure_channel_file_editor_schema()
     ensure_footer_bulk_refresh_schema()
     ensure_smart_schema()
@@ -15467,6 +15472,11 @@ async def smart_private_contact_handler(update: Update, context: ContextTypes.DE
     await handle_visit_contact(update, context)
 
 
+async def connect_bazdid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    session = get_session(update.effective_user.id) if update.effective_user else None
+    await handle_visit_ops_connect(update, context, session)
+
+
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set")
@@ -15481,6 +15491,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("login", login_command))
     app.add_handler(CommandHandler("logout", logout))
+    app.add_handler(CommandHandler("connect_bazdid", connect_bazdid_command))
 
     app.add_handler(
         MessageHandler(
