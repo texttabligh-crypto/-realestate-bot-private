@@ -17,6 +17,11 @@ from publisher import (
     get_property_for_publish,
 )
 
+from visit_ops_group import (
+    get_visit_ops_target,
+    telegram_thread_kwargs,
+)
+
 from visit_leads import (
     clear_pending_action,
     create_or_get_visit_request,
@@ -407,10 +412,24 @@ async def _notify_visit_operators(
     operator_ids = (
         get_visit_operator_telegram_ids()
     )
+    visit_group = get_visit_ops_target()
 
-    if not operator_ids:
+    if visit_group:
+        delivery_targets = [
+            (
+                int(visit_group[0]),
+                telegram_thread_kwargs(visit_group),
+            )
+        ]
+    else:
+        delivery_targets = [
+            (int(operator_id), {})
+            for operator_id in operator_ids
+        ]
+
+    if not delivery_targets:
         logging.warning(
-            "No visit operators available: request_id=%s",
+            "No visit destination available: request_id=%s",
             request_id,
         )
         return 0
@@ -455,7 +474,7 @@ async def _notify_visit_operators(
 
     successful_operators = 0
 
-    for operator_chat_id in operator_ids:
+    for operator_chat_id, thread_kwargs in delivery_targets:
         try:
             await bot.send_message(
                 chat_id=operator_chat_id,
@@ -468,6 +487,7 @@ async def _notify_visit_operators(
                     if property_id
                     else None
                 ),
+                **thread_kwargs,
             )
 
             file_sent = False
@@ -481,6 +501,7 @@ async def _notify_visit_operators(
                         chat_id=operator_chat_id,
                         from_chat_id=destination_chat_id,
                         message_id=published_message_id,
+                        **thread_kwargs,
                     )
 
                     file_sent = True
@@ -509,6 +530,7 @@ async def _notify_visit_operators(
                         chat_id=operator_chat_id,
                         text=full_property_text,
                         disable_web_page_preview=True,
+                        **thread_kwargs,
                     )
 
                 except Exception:
