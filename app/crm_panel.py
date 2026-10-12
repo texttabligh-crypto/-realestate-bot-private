@@ -6513,3 +6513,56 @@ async def handle_crm_button(update, context, session):
 # Source-channel tools moved into Settings and main menu
 # packed into two-column rows.
 # =========================================================
+
+
+# =========================================================
+# CRM CAMPAIGN HUB V4
+# Link audiences, safe broadcasts, and unanswered questions.
+# =========================================================
+
+_crm_campaign_v4_legacy_build_main_menu = build_main_menu
+_crm_campaign_v4_legacy_handle_button = handle_crm_button
+_crm_campaign_v4_legacy_handle_text = handle_crm_text
+
+
+def build_main_menu(session, legacy_keyboard):
+    markup = _crm_campaign_v4_legacy_build_main_menu(session, legacy_keyboard)
+    rows = [list(row) for row in (markup.inline_keyboard if markup else [])]
+    if has_permission(session, "customers_manage"):
+        campaign_row = [
+            InlineKeyboardButton("🎯 دسته‌های لینک", callback_data="crm_campaigns"),
+            InlineKeyboardButton("💬 سؤال‌های مشتریان", callback_data="crm_support_inbox"),
+        ]
+        insert_at = max(0, len(rows) - 1)
+        rows.insert(insert_at, campaign_row)
+    return InlineKeyboardMarkup(rows)
+
+
+async def handle_crm_button(update, context, session):
+    action = ((update.callback_query.data if update.callback_query else "") or "")
+    if action.startswith("crm_campaign") or action.startswith("crm_support"):
+        if not has_permission(session, "customers_manage"):
+            await update.callback_query.edit_message_text(
+                "⛔ دسترسی ندارید.", reply_markup=_main_back()
+            )
+            return True
+        from crm_campaign_hub import handle_button as handle_campaign_hub_button
+        if await handle_campaign_hub_button(update, context, session):
+            return True
+    return await _crm_campaign_v4_legacy_handle_button(update, context, session)
+
+
+async def handle_crm_text(update, context, session):
+    state = context.user_data.get("state") or ""
+    if state in {"crm_campaign_broadcast_text", "crm_support_reply_text"}:
+        if not has_permission(session, "customers_manage"):
+            context.user_data.clear()
+            await update.message.reply_text("⛔ دسترسی ندارید.", reply_markup=_main_back())
+            return True
+        from crm_campaign_hub import handle_text as handle_campaign_hub_text
+        if await handle_campaign_hub_text(update, context, session):
+            return True
+    return await _crm_campaign_v4_legacy_handle_text(update, context, session)
+
+
+# === END CRM CAMPAIGN HUB V4 ===
