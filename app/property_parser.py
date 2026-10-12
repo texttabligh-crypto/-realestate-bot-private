@@ -80,6 +80,18 @@ def normalize_text(text: str) -> str:
     text = text.replace("٬", ",")
     text = text.replace("،", ",")
 
+    # Telegram/copy-paste text may contain bidi and zero-width
+    # characters between words. Treat them as ordinary spaces so
+    # explicit phrases such as «بدون آسانسور» keep their meaning.
+    text = re.sub(
+        r"[\u200b\u200c\u200d\u200e\u200f"
+        r"\u202a-\u202e\u2066-\u2069\ufeff]",
+        " ",
+        text,
+    )
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+
     return text.strip()
 
 
@@ -416,28 +428,36 @@ def parse_direction(text: str):
 
 
 def parse_boolean_feature(text: str, feature: str):
+    text = normalize_text(text or "")
+    feature_pattern = re.escape(feature)
+    separator = r"[\s:：\-–—|,؛]*"
+
+    # Explicit negative wording always wins over a bare feature name.
+    # This covers formal, colloquial and punctuated Telegram formats.
     negative_patterns = [
-        rf"بدون\s+{feature}",
-        rf"{feature}\s+ندارد",
-        rf"فاقد\s+{feature}",
+        rf"بدون(?:\s+|{separator}){feature_pattern}",
+        rf"فاقد(?:\s+|{separator}){feature_pattern}",
+        rf"{feature_pattern}{separator}(?:ندارد|نداره|نیست)",
+        rf"{feature_pattern}{separator}نمی(?:\s*)باشد",
+        rf"{feature_pattern}{separator}(?:❌|✖️?|⛔)",
     ]
 
     for pattern in negative_patterns:
-        if re.search(pattern, text):
+        if re.search(pattern, text, flags=re.IGNORECASE):
             return False
 
     positive_patterns = [
-        rf"{feature}\s+دار(?:د)?",
-        rf"دارای\s+{feature}",
-        rf"{feature}",
+        rf"دارای(?:\s+|{separator}){feature_pattern}",
+        rf"{feature_pattern}{separator}(?:دارد|داره|هست)",
+        rf"{feature_pattern}{separator}(?:✅|✔️?)",
+        rf"{feature_pattern}",
     ]
 
     for pattern in positive_patterns:
-        if re.search(pattern, text):
+        if re.search(pattern, text, flags=re.IGNORECASE):
             return True
 
     return None
-
 
 
 
@@ -1067,8 +1087,8 @@ def parse_dynamic_attributes(text: str):
 
     deed_match = re.search(
         r"(?mi)^[ \t]*"
-        r"(?:✨️?|〽️|🔹|🔸|♦️|♦|▪️|▪|•|◾|🌱)?[ \t]*"
-        r"سند[ \t]*[:：\-]?[ \t]*"
+        r"(?:✨️?|〽️|🔹|🔸|♦️|♦|▪️|▪|•|◾|🌱|📄)?[ \t]*"
+        r"(?:نوع[ \t]+)?سند[ \t]*[:：\-]?[ \t]*"
         r"([^\n\r]+)$",
         normalized_text,
     )
@@ -1077,67 +1097,49 @@ def parse_dynamic_attributes(text: str):
 
     if deed_match:
         value = deed_match.group(1).strip()
-
         value = re.split(
             r"\s*(?:🔹|🔸|♦️|♦|▪️|▪|•|◾|[؛;])\s*",
             value,
             maxsplit=1,
         )[0].strip()
-
         if value:
             deed_value = value
 
-    # Some source formats put deed information at the end
-    # of another line, for example:
-    # "نصبیات کامل ؛ سند تک برگ"
+    # Preserve the exact legal form even when it appears inline,
+    # e.g. «نصبیات کامل؛ سند قراردادی» or «سند قول نامه‌ای».
     if not deed_value:
         inline_deed_match = re.search(
-            r"(?mi)^.*?"
-            r"سند[ \t]*[:：\-]?[ \t]*"
+            r"(?mi)(?:نوع[ \t]+)?سند[ \t]*[:：\-]?[ \t]*"
             r"(تک[ \t]*برگ"
             r"|شش[ \t]*دانگ"
             r"|ششدانگ"
+            r"|قراردادی"
+            r"|قول[ \t]*نامه(?:[ \t]*ای)?"
+            r"|وکالتی"
+            r"|تعاونی"
+            r"|مشاع"
+            r"|عرصه(?:[ \t]*و[ \t]*اعیان)?"
             r"|در[ \t]*دست[ \t]*اقدام"
             r"|دردست[ \t]*اقدام"
+            r"|فاقد[ \t]*سند"
             r"|پایان[ \t]*کار"
-            r"|پایانکار)"
-            r".*$",
+            r"|پایانکار)",
             normalized_text,
         )
-
         if inline_deed_match:
             deed_value = inline_deed_match.group(1).strip()
 
     if deed_value:
-        deed_value = re.sub(
-            r"[ \t]+",
-            " ",
-            deed_value,
-        ).strip()
-
-        deed_value = re.sub(
-            r"شش[ \t]*دانگ",
-            "ششدانگ",
-            deed_value,
-        )
-
+        deed_value = re.sub(r"[ \t]+", " ", deed_value).strip()
+        deed_value = re.sub(r"شش[ \t]*دانگ", "ششدانگ", deed_value)
         deed_value = re.sub(
             r"(?:در[ \t]*دست|دردست)[ \t]*اقدام",
             "در دست اقدام",
             deed_value,
         )
-
-        deed_value = re.sub(
-            r"تک[ \t]*برگ",
-            "تک برگ",
-            deed_value,
-        )
-
-        deed_value = re.sub(
-            r"پایان[ \t]*کار",
-            "پایانکار",
-            deed_value,
-        )
+        deed_value = re.sub(r"تک[ \t]*برگ", "تک برگ", deed_value)
+        deed_value = re.sub(r"قول[ \t]*نامه(?:[ \t]*ای)?", "قولنامه‌ای", deed_value)
+        deed_value = re.sub(r"پایان[ \t]*کار", "پایانکار", deed_value)
 
         attributes.append(
             {

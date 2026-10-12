@@ -7,6 +7,8 @@ from typing import Optional
 import psycopg
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from phone_utils import normalize_iran_phone
+
 
 # =========================================================
 # DATABASE CONNECTION
@@ -193,9 +195,9 @@ def save_customer_phone(
     telegram_user_id: int,
     phone_number: str,
 ):
-    phone_number = str(
-        phone_number or ""
-    ).strip()
+    phone_number = normalize_iran_phone(
+        phone_number
+    )
 
     if not phone_number:
         raise ValueError(

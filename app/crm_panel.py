@@ -1769,7 +1769,7 @@ async def run_visit_reminders(application):
             "⏰ یادآوری بازدید\n\n"
             "حدود یک ساعت تا زمان بازدید باقی مانده.\n\n"
             f"👤 مشتری: {name}\n"
-            f"📞 {phone or '-'}\n"
+            f"📞 {normalize_phone(phone) or '-'}\n"
             f"🔢 کد واحد: {unit_code or '-'}\n"
             f"🕐 زمان: {local.strftime('%Y-%m-%d %H:%M')}"
         )

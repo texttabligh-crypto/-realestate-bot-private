@@ -17,6 +17,8 @@ from publisher import (
     get_property_for_publish,
 )
 
+from phone_utils import normalize_iran_phone
+
 from visit_ops_group import (
     get_visit_ops_target,
     telegram_thread_kwargs,
@@ -131,7 +133,9 @@ def _build_operator_lead_text(detail):
 
     telegram_user_id = detail[6]
     telegram_username = detail[7]
-    phone_number = detail[10]
+    phone_number = normalize_iran_phone(
+        detail[10]
+    )
 
     address = (
         detail[11]

@@ -275,9 +275,50 @@ missing = [key for key, passed in checks.items() if not passed]
 if missing:
     raise SystemExit("missing checks: " + ", ".join(missing))
 
-from app.property_parser import parse_price_billion
+from app.property_parser import (
+    parse_dynamic_attributes,
+    parse_price_billion,
+    parse_property,
+)
+from app.phone_utils import normalize_iran_phone
 
 if str(parse_price_billion("قیمت کل: ۵ میلیارد ۶۰۰ تومان")) != "5.6":
     raise SystemExit("colloquial decimal price regression")
+
+negative_elevator_samples = (
+    "بدون آسانسور",
+    "آسانسور ندارد",
+    "آسانسور: نداره",
+    "آسانسور نمی‌باشد",
+    "آسانسور ❌",
+)
+for sample in negative_elevator_samples:
+    if parse_property(sample)["has_elevator"] is not False:
+        raise SystemExit(f"negative elevator regression: {sample}")
+
+if parse_property("دارای آسانسور")["has_elevator"] is not True:
+    raise SystemExit("positive elevator regression")
+
+def deed_value(sample):
+    for item in parse_dynamic_attributes(sample):
+        if item["attribute_key"] == "deed_type":
+            return item["attribute_value"]
+    return None
+
+if deed_value("نصبیات کامل؛ سند قراردادی") != "قراردادی":
+    raise SystemExit("contract deed regression")
+
+if deed_value("سند قول نامه ای") != "قولنامه‌ای":
+    raise SystemExit("promissory deed regression")
+
+phone_cases = {
+    "+98 935 938 4979": "09359384979",
+    "989359384979": "09359384979",
+    "9359384979": "09359384979",
+    "۰۹۳۵۹۳۸۴۹۷۹": "09359384979",
+}
+for raw_phone, expected_phone in phone_cases.items():
+    if normalize_iran_phone(raw_phone) != expected_phone:
+        raise SystemExit(f"phone normalization regression: {raw_phone}")
 
 print("ADVANCED_SMART_SEARCH_V2_SMOKE_OK")
