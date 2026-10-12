@@ -280,7 +280,7 @@ from app.property_parser import (
     parse_price_billion,
     parse_property,
 )
-from app.visit_leads import normalize_iran_phone
+from app.phone_utils import normalize_iran_phone
 
 if str(parse_price_billion("قیمت کل: ۵ میلیارد ۶۰۰ تومان")) != "5.6":
     raise SystemExit("colloquial decimal price regression")
