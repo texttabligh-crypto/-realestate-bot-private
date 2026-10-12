@@ -34,6 +34,7 @@ from visit_leads import (
     get_unnotified_visit_request_ids,
     get_visitable_property,
     mark_visit_notified,
+    normalize_iran_phone,
     save_customer_phone,
     set_pending_visit,
     upsert_customer_profile,
@@ -131,7 +132,9 @@ def _build_operator_lead_text(detail):
 
     telegram_user_id = detail[6]
     telegram_username = detail[7]
-    phone_number = detail[10]
+    phone_number = normalize_iran_phone(
+        detail[10]
+    )
 
     address = (
         detail[11]
