@@ -8651,8 +8651,8 @@ FORCED_NO_ELEVATOR_UNIT_CODES = {"25610"}
 def _explicit_feature_repair_rows():
     """
     Read the property raw text plus every recorded source copy.
-    The known reported unit is forced once; other units change only
-    when at least one stored source explicitly says there is no elevator.
+    The known reported unit is forced once; other units change only when stored source text explicitly says a
+    parking, elevator or storage facility is absent.
     """
     with db_connect() as conn:
         with conn.cursor() as cur:
@@ -8796,8 +8796,9 @@ async def repair_explicit_source_feature_mismatches(application):
         missing_features = set()
 
         if (
-            str(unit_code or "").strip()
-            in FORCED_NO_ELEVATOR_UNIT_CODES
+            has_elevator is True
+            and str(unit_code or "").strip()
+                in FORCED_NO_ELEVATOR_UNIT_CODES
         ):
             missing_features.add("elevator")
 
@@ -8853,7 +8854,7 @@ async def repair_explicit_source_feature_mismatches(application):
             )
         except Exception:
             logging.exception(
-                "Explicit no-elevator post refresh failed: "
+                "Explicit facility post refresh failed: "
                 "property_id=%s",
                 property_id,
             )
@@ -8865,11 +8866,11 @@ async def repair_explicit_source_feature_mismatches(application):
             await queue_targeted_category_sync(
                 application.bot,
                 repaired,
-                reason="explicit-no-elevator-repair",
+                reason="explicit-facility-repair",
             )
         except Exception:
             logging.exception(
-                "Category sync after no-elevator repair failed"
+                "Category sync after facility repair failed"
             )
 
     deed_repairs = []
