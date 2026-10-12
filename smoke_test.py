@@ -144,6 +144,15 @@ checks = {
             "ساخت لینک جذب مشتری",
         )
     ),
+    "deleted_destination_catalog_cleanup": all(
+        value in bot
+        for value in (
+            "_mark_destination_post_deleted",
+            "set(watched) - set(observed)",
+            "destination-public-post-deleted",
+            "deleted_count",
+        )
+    ),
     "bazdid_file_visit_operations": all(
         value in visit_ops
         for value in (
