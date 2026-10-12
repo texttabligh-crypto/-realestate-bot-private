@@ -1632,7 +1632,7 @@ def _welcome_text():
         "بعد از تکمیل اطلاعات، فایل برای بررسی ShahFile ارسال می‌شه و بعد از تأیید مدیر وارد سیستم و مسیر انتشار می‌شه.\n\n"
         "🔎 واحد می‌خوام\n"
         "اگر دنبال خرید هستید، بودجه، متراژ، منطقه، تعداد خواب و ویژگی‌های مدنظرتون رو می‌گید و ShahFile بین فایل‌های واقعی موجود جستجو می‌کنه. "
-        "بعد از پیدا کردن گزینه مناسب، می‌تونید از همینجا درخواست بازدید ثبت کنید و در صورت تمایل پیشنهاد فایل‌های جدید مشابه رو هم دریافت کنید.\n\n"
+        "بعد از پیدا کردن گزینه مناسب، می‌تونید از همینجا درخواست بازدید ثبت کنید. فایل‌های جدید مطابق آخرین جستجوی شما هم خودکار ارسال می‌شن و هر زمان نخواستید کلمه «لغو» رو بفرستید.\n\n"
         "یکی از مسیرهای زیر رو انتخاب کنید 👇"
     )
 
@@ -1764,18 +1764,14 @@ def _search_watch_offer_keyboard(subscription_id: int):
     ])
 
 
-async def _send_search_results_with_watch_offer(update, result_text, keyboard, subscription_id):
+async def _send_search_results(update, result_text, keyboard, subscription_id):
+    # subscribe_and_render has already activated the newest search. The
+    # results footer transparently explains that «لغو» stops future alerts.
     await update.message.reply_text(
         result_text,
         reply_markup=keyboard,
         disable_web_page_preview=True,
     )
-    if subscription_id:
-        await update.message.reply_text(
-            "🔔 می‌خواین در روزهای آینده هم هر فایل جدیدی که دقیقاً با همین جستجو جور بود براتون ارسال کنم؟\n\n"
-            "هر وقت نخواستید، فقط کلمه «لغو» رو بفرستید.",
-            reply_markup=_search_watch_offer_keyboard(subscription_id),
-        )
 
 
 def _search_confirmation_text(filters):
@@ -1888,7 +1884,7 @@ async def handle_customer_text(update, context):
                 {"area_min": low_area, "area_max": high_area},
                 text,
             )
-            await _send_search_results_with_watch_offer(
+            await _send_search_results(
                 update, result_text, keyboard, _sub_id
             )
             return True
@@ -1948,7 +1944,7 @@ async def handle_customer_text(update, context):
         result_text, keyboard, _total, _sub_id = subscribe_and_render(
             user.id, customer_id, search_filters, text
         )
-        await _send_search_results_with_watch_offer(
+        await _send_search_results(
             update, result_text, keyboard, _sub_id
         )
         return True
@@ -1962,7 +1958,7 @@ async def handle_customer_text(update, context):
             {"area_min": low_area, "area_max": high_area},
             text,
         )
-        await _send_search_results_with_watch_offer(
+        await _send_search_results(
             update, result_text, keyboard, _sub_id
         )
         return True
@@ -2474,12 +2470,8 @@ async def handle_customer_callback(update, context, session=None):
             reply_markup=keyboard,
             disable_web_page_preview=True,
         )
-        if subscription_id:
-            await query.message.reply_text(
-                "🔔 می‌خواین در روزهای آینده هم هر فایل جدیدی که دقیقاً با همین جستجو جور بود براتون ارسال کنم؟\n\n"
-                "هر وقت نخواستید، فقط کلمه «لغو» رو بفرستید.",
-                reply_markup=_search_watch_offer_keyboard(subscription_id),
-            )
+        # The newest confirmed search is active automatically. Customers can
+        # stop future matches at any time by sending «لغو».
         return True
 
     if action == "sc_search_edit":
