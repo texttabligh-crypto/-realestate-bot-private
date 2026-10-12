@@ -955,36 +955,161 @@ def log_scheduler_health_snapshot():
     )
 
 
+_scheduler_tick_lock = None
+
+
+def _get_scheduler_tick_lock():
+    global _scheduler_tick_lock
+
+    if _scheduler_tick_lock is None:
+        _scheduler_tick_lock = asyncio.Lock()
+
+    return _scheduler_tick_lock
+
+
+def ensure_scheduler_runtime_state():
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scheduler_runtime_state (
+                    worker_name TEXT PRIMARY KEY,
+                    last_started_at TIMESTAMPTZ,
+                    last_finished_at TIMESTAMPTZ,
+                    last_error TEXT,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            conn.commit()
+
+
+def record_scheduler_runtime(
+    worker_name,
+    *,
+    started=False,
+    finished=False,
+    error_text=None,
+):
+    ensure_scheduler_runtime_state()
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO scheduler_runtime_state (
+                    worker_name,
+                    last_started_at,
+                    last_finished_at,
+                    last_error,
+                    updated_at
+                )
+                VALUES (
+                    %s,
+                    CASE WHEN %s THEN NOW() ELSE NULL END,
+                    CASE WHEN %s THEN NOW() ELSE NULL END,
+                    %s,
+                    NOW()
+                )
+                ON CONFLICT (worker_name)
+                DO UPDATE SET
+                    last_started_at = CASE
+                        WHEN %s THEN NOW()
+                        ELSE scheduler_runtime_state.last_started_at
+                    END,
+                    last_finished_at = CASE
+                        WHEN %s THEN NOW()
+                        ELSE scheduler_runtime_state.last_finished_at
+                    END,
+                    last_error = %s,
+                    updated_at = NOW()
+                """,
+                (
+                    worker_name,
+                    started,
+                    finished,
+                    error_text,
+                    started,
+                    finished,
+                    error_text,
+                ),
+            )
+            conn.commit()
+
+
+async def run_guarded_scheduler_tick(
+    application,
+    worker_name,
+):
+    lock = _get_scheduler_tick_lock()
+
+    try:
+        await asyncio.wait_for(
+            lock.acquire(),
+            timeout=5,
+        )
+    except TimeoutError:
+        logging.warning(
+            "Scheduler %s skipped: tick lock busy",
+            worker_name,
+        )
+        return
+
+    try:
+        record_scheduler_runtime(
+            worker_name,
+            started=True,
+        )
+
+        await asyncio.wait_for(
+            run_scheduler_tick(application),
+            timeout=120,
+        )
+
+        record_scheduler_runtime(
+            worker_name,
+            finished=True,
+        )
+
+    except asyncio.CancelledError:
+        raise
+
+    except Exception as exc:
+        record_scheduler_runtime(
+            worker_name,
+            finished=True,
+            error_text=str(exc)[:1000],
+        )
+        logging.exception(
+            "Scheduler %s tick failed",
+            worker_name,
+        )
+
+    finally:
+        lock.release()
+
+
 async def scheduler_loop(application):
     logging.info(
-        "Scheduler background loop started."
+        "Scheduler primary loop started."
     )
-
-    # Emit after the other startup workers so deployment logs retain
-    # the scheduler state even when another worker reports an error.
-    await asyncio.sleep(1)
-    try:
-        log_scheduler_health_snapshot()
-    except Exception:
-        logging.exception(
-            "Scheduler health snapshot failed"
-        )
 
     while True:
         try:
-            await run_scheduler_tick(
-                application
+            await run_guarded_scheduler_tick(
+                application,
+                "primary",
             )
 
         except asyncio.CancelledError:
             logging.info(
-                "Scheduler background loop stopped."
+                "Scheduler primary loop stopped."
             )
             raise
 
         except Exception:
             logging.exception(
-                "Unhandled scheduler loop error"
+                "Unhandled scheduler primary loop error"
             )
 
         await asyncio.sleep(
@@ -992,21 +1117,65 @@ async def scheduler_loop(application):
         )
 
 
+async def scheduler_watchdog_loop(application):
+    logging.info(
+        "Scheduler watchdog loop started."
+    )
+
+    # Stagger the watchdog from the primary worker.
+    await asyncio.sleep(10)
+
+    while True:
+        try:
+            await run_guarded_scheduler_tick(
+                application,
+                "watchdog",
+            )
+
+        except asyncio.CancelledError:
+            logging.info(
+                "Scheduler watchdog loop stopped."
+            )
+            raise
+
+        except Exception:
+            logging.exception(
+                "Unhandled scheduler watchdog loop error"
+            )
+
+        await asyncio.sleep(60)
+
+
 def start_scheduler(application):
-    existing = application.bot_data.get(
+    ensure_scheduler_runtime_state()
+
+    primary = application.bot_data.get(
         "scheduler_task"
     )
 
-    if existing and not existing.done():
-        return existing
+    if not primary or primary.done():
+        primary = asyncio.create_task(
+            scheduler_loop(application),
+            name="realestate_scheduler",
+        )
+        application.bot_data[
+            "scheduler_task"
+        ] = primary
 
-    task = asyncio.create_task(
-        scheduler_loop(application),
-        name="realestate_scheduler",
+    watchdog = application.bot_data.get(
+        "scheduler_watchdog_task"
     )
 
-    application.bot_data[
-        "scheduler_task"
-    ] = task
+    if not watchdog or watchdog.done():
+        watchdog = asyncio.create_task(
+            scheduler_watchdog_loop(
+                application
+            ),
+            name="realestate_scheduler_watchdog",
+        )
+        application.bot_data[
+            "scheduler_watchdog_task"
+        ] = watchdog
 
-    return task
+    return primary
+
