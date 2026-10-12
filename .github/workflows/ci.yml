@@ -18,5 +18,7 @@ jobs:
           python-version: "3.12"
       - name: Compile Python sources
         run: python -m compileall -q app partner_hub
+      - name: Validate deployment wrapper
+        run: bash -n deploy/deploy-realestate-bot
       - name: Run project smoke test
         run: python smoke_test.py
