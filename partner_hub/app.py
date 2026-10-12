@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import Bot, InlineKeyboardButton as B, InlineKeyboardMarkup as M, InputMediaPhoto, Update
+from telegram import Bot, BotCommand, InlineKeyboardButton as B, InlineKeyboardMarkup as M, InputMediaPhoto, MenuButtonCommands, Update
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
@@ -66,6 +66,25 @@ def clean_phone(value):
     value = re.sub(r"[^0-9+]", "", digits(value))
     if len(re.sub(r"\D", "", value)) < 8: raise ValueError("phone")
     return value
+
+
+async def configure_blue_menu(application: Application):
+    """Expose Telegram's blue Menu button for hub and tenant bots."""
+    await application.bot.set_my_commands(
+        [
+            BotCommand("start", "شروع ربات"),
+            BotCommand("menu", "منوی اصلی"),
+        ]
+    )
+    await application.bot.set_chat_menu_button(
+        menu_button=MenuButtonCommands()
+    )
+    me = await application.bot.get_me()
+    log.info(
+        "blue menu configured bot=@%s id=%s",
+        me.username,
+        me.id,
+    )
 
 
 def home_keyboard(member=None, owner=False):
@@ -489,7 +508,9 @@ async def tenant_supervisor(hub_app:Application):
                 if aid in running: continue
                 try:
                     app=Application.builder().token(decrypt_token(row['encrypted_token'])).build(); add_handlers(app)
-                    await app.initialize(); await app.start(); await app.updater.start_polling(allowed_updates=Update.ALL_TYPES,drop_pending_updates=False)
+                    await app.initialize()
+                    await configure_blue_menu(app)
+                    await app.start(); await app.updater.start_polling(allowed_updates=Update.ALL_TYPES,drop_pending_updates=False)
                     running[aid]=app; log.info("white-label bot started agency=%s",aid)
                 except Exception as exc:
                     log.exception("tenant bot failed agency=%s",aid); db.execute("UPDATE partner_bot_connections SET status='ERROR',last_error=%s,updated_at=NOW() WHERE agency_id=%s",(str(exc)[:2000],aid))
@@ -526,6 +547,7 @@ async def schedule_worker(app:Application):
 
 
 async def post_init(app):
+    await configure_blue_menu(app)
     asyncio.create_task(tenant_supervisor(app),name="tenant-supervisor")
     asyncio.create_task(schedule_worker(app),name="partner-schedule-worker")
 
