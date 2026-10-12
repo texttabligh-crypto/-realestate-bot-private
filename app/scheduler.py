@@ -899,18 +899,59 @@ def log_scheduler_health_snapshot():
             )
             published_36h = int(cur.fetchone()[0] or 0)
 
+            cur.execute(
+                """
+                SELECT
+                    sal.property_id,
+                    p.unit_code,
+                    sal.attempt_status,
+                    TO_CHAR(
+                        sal.attempted_at AT TIME ZONE 'Asia/Tehran',
+                        'YYYY-MM-DD HH24:MI:SS'
+                    )
+                FROM scheduler_attempt_log sal
+                LEFT JOIN properties p ON p.id = sal.property_id
+                WHERE sal.attempted_at >= NOW() - INTERVAL '36 hours'
+                ORDER BY sal.attempted_at DESC, sal.id DESC
+                LIMIT 10
+                """
+            )
+            recent_attempts = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT
+                    q.property_id,
+                    p.unit_code,
+                    LEFT(COALESCE(q.last_error, ''), 500),
+                    TO_CHAR(
+                        q.updated_at AT TIME ZONE 'Asia/Tehran',
+                        'YYYY-MM-DD HH24:MI:SS'
+                    )
+                FROM publish_queue q
+                JOIN properties p ON p.id = q.property_id
+                WHERE q.queue_status = 'FAILED'
+                ORDER BY q.updated_at DESC, q.id DESC
+                LIMIT 5
+                """
+            )
+            recent_failures = cur.fetchall()
+
     eligible_count = len(get_queue_candidates(limit=500))
 
     logging.info(
         "SCHEDULER_HEALTH tehran_now=%s windows=%s "
         "queue_counts=%s eligible=%s attempts_36h=%s "
-        "published_36h=%s",
+        "published_36h=%s recent_attempts=%s "
+        "recent_failures=%s",
         datetime.now(TEHRAN).isoformat(timespec="seconds"),
         windows,
         queue_counts,
         eligible_count,
         attempts,
         published_36h,
+        recent_attempts,
+        recent_failures,
     )
 
 
