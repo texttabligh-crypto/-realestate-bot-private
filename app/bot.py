@@ -8648,7 +8648,7 @@ def start_destination_public_price_watcher(
 FORCED_NO_ELEVATOR_UNIT_CODES = {"25610"}
 
 
-def _explicit_elevator_repair_rows():
+def _explicit_feature_repair_rows():
     """
     Read the property raw text plus every recorded source copy.
     The known reported unit is forced once; other units change only
@@ -8662,6 +8662,9 @@ def _explicit_elevator_repair_rows():
                     p.id,
                     p.unit_code,
                     p.raw_text,
+                    p.has_parking,
+                    p.has_elevator,
+                    p.has_storage,
                     COALESCE(
                         ARRAY_AGG(ps.source_raw_text)
                             FILTER (
@@ -8675,48 +8678,57 @@ def _explicit_elevator_repair_rows():
                   ON ps.property_id = p.id
                 WHERE p.status = 'ACTIVE'
                   AND p.deleted_from_channel_at IS NULL
-                  AND p.has_elevator IS TRUE
                   AND (
-                      p.unit_code::TEXT = ANY(%s)
-                      OR (
-                          p.raw_text IS NOT NULL
-                          AND p.raw_text LIKE '%%آسانسور%%'
-                      )
-                      OR EXISTS (
-                          SELECT 1
-                          FROM property_sources eps
-                          WHERE eps.property_id = p.id
-                            AND eps.source_raw_text IS NOT NULL
-                            AND eps.source_raw_text <> ''
-                            AND eps.source_raw_text LIKE '%%آسانسور%%'
-                      )
+                      p.has_parking IS TRUE
+                      OR p.has_elevator IS TRUE
+                      OR p.has_storage IS TRUE
                   )
                 GROUP BY
                     p.id,
                     p.unit_code,
-                    p.raw_text
+                    p.raw_text,
+                    p.has_parking,
+                    p.has_elevator,
+                    p.has_storage
                 ORDER BY p.id
                 """,
-                (list(FORCED_NO_ELEVATOR_UNIT_CODES),),
             )
             return cur.fetchall()
 
 
-def _set_explicit_no_elevator(property_id):
+def _set_explicit_missing_features(
+    property_id,
+    missing_features,
+):
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 UPDATE properties
                 SET
-                    has_elevator = FALSE,
+                    has_parking = CASE
+                        WHEN %s THEN FALSE
+                        ELSE has_parking
+                    END,
+                    has_elevator = CASE
+                        WHEN %s THEN FALSE
+                        ELSE has_elevator
+                    END,
+                    has_storage = CASE
+                        WHEN %s THEN FALSE
+                        ELSE has_storage
+                    END,
                     updated_at = NOW()
                 WHERE id = %s
-                  AND has_elevator IS TRUE
                   AND status = 'ACTIVE'
                   AND deleted_from_channel_at IS NULL
                 """,
-                (property_id,),
+                (
+                    "parking" in missing_features,
+                    "elevator" in missing_features,
+                    "storage" in missing_features,
+                    property_id,
+                ),
             )
             changed = cur.rowcount > 0
             conn.commit()
@@ -8761,38 +8773,75 @@ def _parsed_deed_attribute(source_raw_text):
 
 
 async def repair_explicit_source_feature_mismatches(application):
-    negative_property_ids = set()
+    repairs_by_property = {}
 
     for (
         property_id,
         unit_code,
         property_raw_text,
+        has_parking,
+        has_elevator,
+        has_storage,
         source_raw_texts,
-    ) in _explicit_elevator_repair_rows():
-        unit_code_text = str(unit_code or "").strip()
-
-        if unit_code_text in FORCED_NO_ELEVATOR_UNIT_CODES:
-            negative_property_ids.add(int(property_id))
-            continue
-
+    ) in _explicit_feature_repair_rows():
         candidate_texts = [
             property_raw_text,
             *(source_raw_texts or []),
         ]
-
-        if any(
-            text
-            and parse_property(text).get("has_elevator") is False
+        parsed_candidates = [
+            parse_property(text)
             for text in candidate_texts
+            if text
+        ]
+        missing_features = set()
+
+        if (
+            str(unit_code or "").strip()
+            in FORCED_NO_ELEVATOR_UNIT_CODES
         ):
-            negative_property_ids.add(int(property_id))
+            missing_features.add("elevator")
+
+        if (
+            has_parking is True
+            and any(
+                parsed.get("has_parking") is False
+                for parsed in parsed_candidates
+            )
+        ):
+            missing_features.add("parking")
+
+        if (
+            has_elevator is True
+            and any(
+                parsed.get("has_elevator") is False
+                for parsed in parsed_candidates
+            )
+        ):
+            missing_features.add("elevator")
+
+        if (
+            has_storage is True
+            and any(
+                parsed.get("has_storage") is False
+                for parsed in parsed_candidates
+            )
+        ):
+            missing_features.add("storage")
+
+        if missing_features:
+            repairs_by_property[int(property_id)] = (
+                missing_features
+            )
 
     repaired = []
 
     # Repair elevator mismatches first so the reported channel post
     # is corrected immediately, before slower metadata maintenance.
-    for property_id in sorted(negative_property_ids):
-        if not _set_explicit_no_elevator(property_id):
+    for property_id in sorted(repairs_by_property):
+        if not _set_explicit_missing_features(
+            property_id,
+            repairs_by_property[property_id],
+        ):
             continue
 
         repaired.append(property_id)
@@ -8862,7 +8911,7 @@ async def repair_explicit_source_feature_mismatches(application):
 
     logging.info(
         "Explicit source feature repair completed: "
-        "no_elevator=%s deed_type=%s forced_units=%s",
+        "feature_posts=%s deed_type=%s forced_units=%s",
         len(repaired),
         len(deed_repairs),
         sorted(FORCED_NO_ELEVATOR_UNIT_CODES),
