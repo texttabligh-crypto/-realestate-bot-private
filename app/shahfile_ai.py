@@ -789,10 +789,25 @@ def prepare_search_and_render(telegram_user_id, customer_id, filters, query_text
     return text, keyboard, total, sub_id
 
 
-# Backward-compatible alias for external callers; unlike V1.1 this no longer
-# silently opts a customer into notifications.
+# Customer intent is explicit when they submit a property search. Keep only
+# their newest search active and let the plain-language «لغو» command stop it.
 def subscribe_and_render(telegram_user_id, customer_id, filters, query_text):
-    return prepare_search_and_render(telegram_user_id, customer_id, filters, query_text)
+    result = prepare_search_and_render(
+        telegram_user_id,
+        customer_id,
+        filters,
+        query_text,
+    )
+
+    subscription_id = result[3]
+
+    if subscription_id:
+        activate_search_subscription(
+            subscription_id,
+            telegram_user_id,
+        )
+
+    return result
 
 
 def _active_subscriptions(limit=200):
