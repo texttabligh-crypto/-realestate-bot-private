@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: realestate-production
@@ -22,6 +23,9 @@ jobs:
        github.event.workflow_run.head_branch == 'main')
     runs-on: [self-hosted, Linux, X64, nimatmelk-production]
     timeout-minutes: 20
+    outputs:
+      deployed_sha: ${{ steps.deploy.outputs.deployed_sha }}
+      deployment_report: ${{ steps.deploy.outputs.report }}
 
     steps:
       - name: Check out approved main branch
@@ -37,4 +41,72 @@ jobs:
           python3 smoke_test.py
 
       - name: Deploy through restricted root wrapper
-        run: sudo /usr/local/sbin/deploy-realestate-bot
+        id: deploy
+        shell: bash
+        run: |
+          set +e
+          output="$(sudo /usr/local/sbin/deploy-realestate-bot 2>&1)"
+          status=$?
+          printf '%s\n' "$output"
+
+          delimiter="DEPLOY_REPORT_$(date +%s)_$RANDOM"
+          {
+            echo "deployed_sha=$(git rev-parse HEAD)"
+            echo "report<<$delimiter"
+            printf '%s\n' "$output" | tail -n 100
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
+          exit "$status"
+
+  report:
+    name: Publish production status
+    if: always() && needs.deploy.result != 'skipped'
+    needs: deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Update deployment status issue
+        uses: actions/github-script@v7
+        env:
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          DEPLOYED_SHA: ${{ needs.deploy.outputs.deployed_sha }}
+          DEPLOY_LOG: ${{ needs.deploy.outputs.deployment_report }}
+        with:
+          script: |
+            const result = process.env.DEPLOY_RESULT || 'unknown';
+            const sha = process.env.DEPLOYED_SHA || 'unknown';
+            const rawLog = process.env.DEPLOY_LOG || 'No deployment log was captured.';
+            const safeLog = rawLog.replaceAll('```', '``');
+            const ok = result === 'success';
+            const icon = ok ? '✅' : '❌';
+            const label = ok ? 'موفق' : 'ناموفق';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const shaText = sha === 'unknown'
+              ? 'نامشخص'
+              : `[${sha.slice(0, 12)}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/commit/${sha})`;
+
+            const body = [
+              '# وضعیت استقرار سرور',
+              '',
+              `## ${icon} آخرین استقرار: ${label}`,
+              '',
+              `- **Commit نصب‌شده:** ${shaText}`,
+              `- **زمان ثبت:** ${new Date().toISOString()}`,
+              `- **اجرای GitHub Actions:** [مشاهده اجرا](${runUrl})`,
+              '',
+              '### گزارش بکاپ، Build و سلامت ربات',
+              '',
+              '```text',
+              safeLog,
+              '```',
+              '',
+              '> این صفحه پس از هر استقرار به‌صورت خودکار جایگزین و به‌روزرسانی می‌شود.'
+            ].join('\n');
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: 9,
+              body
+            });
