@@ -14,6 +14,7 @@ NAMES = (
     "publisher.py",
     "visit_flow.py",
     "visit_leads.py",
+    "visit_ops_group.py",
 )
 
 files = {}
@@ -32,6 +33,7 @@ parser = files["property_parser.py"]
 publisher = files["publisher.py"]
 visit_flow = files["visit_flow.py"]
 visit_leads = files["visit_leads.py"]
+visit_ops = files["visit_ops_group.py"]
 
 checks = {
     "manager_buttons": all(
@@ -140,6 +142,42 @@ checks = {
             "start_campaign_watch_worker(application)",
             "customer_campaigns",
             "ساخت لینک جذب مشتری",
+        )
+    ),
+    "bazdid_file_visit_operations": all(
+        value in visit_ops
+        for value in (
+            "visit_ops_destination",
+            "handle_connect_command",
+            "message_thread_id",
+            "گروه عملیات بازدید متصل شد",
+        )
+    ) and all(
+        value in bot
+        for value in (
+            "ensure_visit_ops_schema()",
+            'CommandHandler("connect_bazdid"',
+        )
+    ) and all(
+        value in visit_flow
+        for value in (
+            "get_visit_ops_target",
+            "telegram_thread_kwargs",
+            "delivery_targets",
+        )
+    ) and all(
+        value in smart
+        for value in (
+            "get_visit_ops_target",
+            "recipients",
+            "thread_kwargs",
+        )
+    ) and all(
+        value in crm
+        for value in (
+            "get_visit_ops_target",
+            "telegram_thread_kwargs",
+            "recipients",
         )
     ),
     "crm_campaign_broadcast_and_support": all(
