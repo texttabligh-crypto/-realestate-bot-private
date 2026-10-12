@@ -18,7 +18,12 @@ flock -n 9 || {
 for required in \
     "${SOURCE}/app/bot.py" \
     "${SOURCE}/app/requirements.txt" \
+    "${SOURCE}/partner_hub/app.py" \
+    "${SOURCE}/partner_hub/requirements.txt" \
+    "${SOURCE}/partner_hub/Dockerfile" \
+    "${SOURCE}/docker-compose.yml" \
     "${SOURCE}/smoke_test.py" \
+    "${TARGET}/partner_hub/app.py" \
     "${TARGET}/docker-compose.yml" \
     "${TARGET}/.env"
 do
@@ -28,7 +33,7 @@ do
     }
 done
 
-if find "${SOURCE}/app" -type l -print -quit | grep -q .; then
+if find "${SOURCE}/app" "${SOURCE}/partner_hub" -type l -print -quit | grep -q .; then
     echo "ERROR: symlinks are not allowed in deployment source"
     exit 1
 fi
@@ -38,6 +43,8 @@ BACKUP_DIR="${BACKUP_ROOT}/github_deploy_${STAMP}"
 install -d -m 700 "${BACKUP_DIR}"
 
 rsync -a "${TARGET}/app/" "${BACKUP_DIR}/app/"
+rsync -a "${TARGET}/partner_hub/" "${BACKUP_DIR}/partner_hub/"
+install -m 600 "${TARGET}/docker-compose.yml" "${BACKUP_DIR}/docker-compose.yml"
 SMOKE_TEST_EXISTED=0
 if test -f "${TARGET}/smoke_test.py"; then
     install -m 600 "${TARGET}/smoke_test.py" "${BACKUP_DIR}/smoke_test.py"
@@ -53,6 +60,8 @@ rollback() {
 
     echo "ROLLBACK: restoring ${BACKUP_DIR}"
     rsync -a --delete "${BACKUP_DIR}/app/" "${TARGET}/app/"
+    rsync -a --delete "${BACKUP_DIR}/partner_hub/" "${TARGET}/partner_hub/"
+    install -m 644 "${BACKUP_DIR}/docker-compose.yml" "${TARGET}/docker-compose.yml"
     if test "$(cat "${BACKUP_DIR}/smoke_test_existed")" = "1"; then
         install -m 644 "${BACKUP_DIR}/smoke_test.py" "${TARGET}/smoke_test.py"
     else
@@ -60,8 +69,8 @@ rollback() {
     fi
 
     cd "${TARGET}"
-    docker compose build bot
-    docker compose up -d --no-deps bot
+    docker compose build bot partner_hub
+    docker compose up -d --no-deps bot partner_hub
 
     echo "ROLLBACK_COMPLETE: original exit code ${exit_code}"
     exit "${exit_code}"
@@ -76,18 +85,30 @@ rsync -a \
     --exclude='*' \
     "${SOURCE}/app/" "${TARGET}/app/"
 
+rsync -a \
+    --include='*/' \
+    --include='*.py' \
+    --include='requirements.txt' \
+    --include='Dockerfile' \
+    --include='*.sql' \
+    --exclude='*' \
+    "${SOURCE}/partner_hub/" "${TARGET}/partner_hub/"
+
+install -m 644 "${SOURCE}/docker-compose.yml" "${TARGET}/docker-compose.yml"
 install -m 644 "${SOURCE}/smoke_test.py" "${TARGET}/smoke_test.py"
 
-python3 -m compileall -q "${TARGET}/app"
+python3 -m compileall -q "${TARGET}/app" "${TARGET}/partner_hub"
 
 cd "${TARGET}"
-docker compose build bot
-docker compose up -d --no-deps bot
+docker compose build bot partner_hub
+docker compose up -d --no-deps bot partner_hub
 
 healthy=0
 for _ in $(seq 1 15); do
     if docker inspect -f '{{.State.Running}}' realestate_bot 2>/dev/null | grep -qx true \
-        && docker compose logs --since 2m bot 2>&1 | grep -q "Application started"; then
+        && docker inspect -f '{{.State.Running}}' realestate_partner_hub 2>/dev/null | grep -qx true \
+        && docker compose logs --since 2m bot 2>&1 | grep -q "Application started" \
+        && docker compose logs --since 2m partner_hub 2>&1 | grep -q "Application started"; then
         healthy=1
         break
     fi
@@ -97,8 +118,9 @@ done
 test "${healthy}" -eq 1
 
 sha256sum "${TARGET}/app/bot.py" | tee "${BACKUP_DIR}/bot_after.sha256"
-docker compose ps bot
-docker compose logs --tail=30 bot
+sha256sum "${TARGET}/partner_hub/app.py" | tee "${BACKUP_DIR}/partner_hub_after.sha256"
+docker compose ps bot partner_hub
+docker compose logs --tail=30 bot partner_hub
 
 trap - ERR
 echo "DEPLOY_SUCCESS"
