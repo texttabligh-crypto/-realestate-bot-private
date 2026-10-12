@@ -166,6 +166,18 @@ checks = {
             "deleted_count",
         )
     ),
+    "explicit_source_facility_repair": all(
+        value in bot
+        for value in (
+            'FORCED_NO_ELEVATOR_UNIT_CODES = {"25610"}',
+            "_explicit_feature_repair_rows",
+            "_set_explicit_missing_features",
+            '"parking" in missing_features',
+            '"elevator" in missing_features',
+            '"storage" in missing_features',
+            "start_explicit_source_feature_repair(application)",
+        )
+    ),
     "bazdid_file_visit_operations": all(
         value in visit_ops
         for value in (
