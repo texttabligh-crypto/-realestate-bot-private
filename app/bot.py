@@ -8644,6 +8644,130 @@ def start_destination_public_price_watcher(
     return task
 
 
+# === EXPLICIT SOURCE FEATURE REPAIR V1 ===
+def _explicit_elevator_negative_rows():
+    """
+    Return only active records that currently say elevator=True while
+    an active source text explicitly parses as elevator=False.
+    Ambiguous source text is deliberately ignored.
+    """
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    p.id,
+                    ps.source_raw_text
+                FROM properties p
+                JOIN property_sources ps
+                  ON ps.property_id = p.id
+                 AND ps.is_active = TRUE
+                WHERE p.status = 'ACTIVE'
+                  AND p.deleted_from_channel_at IS NULL
+                  AND p.has_elevator IS TRUE
+                  AND ps.source_raw_text IS NOT NULL
+                  AND ps.source_raw_text <> ''
+                  AND ps.source_raw_text LIKE '%%آسانسور%%'
+                ORDER BY
+                    p.id,
+                    ps.is_primary DESC,
+                    ps.id DESC
+                """
+            )
+            return cur.fetchall()
+
+
+def _set_explicit_no_elevator(property_id):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE properties
+                SET
+                    has_elevator = FALSE,
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND has_elevator IS TRUE
+                  AND status = 'ACTIVE'
+                  AND deleted_from_channel_at IS NULL
+                """,
+                (property_id,),
+            )
+            changed = cur.rowcount > 0
+            conn.commit()
+            return changed
+
+
+async def repair_explicit_source_feature_mismatches(application):
+    negative_property_ids = set()
+
+    for property_id, source_raw_text in _explicit_elevator_negative_rows():
+        parsed = parse_property(source_raw_text)
+
+        if parsed.get("has_elevator") is False:
+            negative_property_ids.add(int(property_id))
+
+    repaired = []
+
+    for property_id in sorted(negative_property_ids):
+        if not _set_explicit_no_elevator(property_id):
+            continue
+
+        repaired.append(property_id)
+
+        try:
+            await refresh_published_property_post(
+                application.bot,
+                property_id,
+            )
+        except Exception:
+            logging.exception(
+                "Explicit no-elevator post refresh failed: "
+                "property_id=%s",
+                property_id,
+            )
+
+        await asyncio.sleep(0.35)
+
+    if repaired:
+        try:
+            await queue_targeted_category_sync(
+                application.bot,
+                repaired,
+                reason="explicit-no-elevator-repair",
+            )
+        except Exception:
+            logging.exception(
+                "Category sync after no-elevator repair failed"
+            )
+
+    logging.info(
+        "Explicit source feature repair completed: "
+        "no_elevator=%s",
+        len(repaired),
+    )
+
+
+def start_explicit_source_feature_repair(application):
+    existing = application.bot_data.get(
+        "explicit_source_feature_repair_task"
+    )
+
+    if existing and not existing.done():
+        return existing
+
+    task = asyncio.create_task(
+        repair_explicit_source_feature_mismatches(
+            application
+        ),
+        name="explicit_source_feature_repair",
+    )
+    application.bot_data[
+        "explicit_source_feature_repair_task"
+    ] = task
+    return task
+
+
 async def post_init(application):
     commands = [
         BotCommand("start", "شروع ربات"),
@@ -8684,6 +8808,7 @@ async def post_init(application):
     start_deleted_posts_watcher(application)
     start_destination_public_price_watcher(application)
     start_source_deleted_posts_watcher(application)
+    start_explicit_source_feature_repair(application)
 
     logging.info(
         "Automatic scheduler initialized."
