@@ -1169,9 +1169,6 @@ async def scheduler_watchdog_loop(application):
         "Scheduler watchdog loop started."
     )
 
-    # Let the primary tick first, then establish the backup heartbeat.
-    await asyncio.sleep(1)
-
     while True:
         try:
             await run_guarded_scheduler_tick(
