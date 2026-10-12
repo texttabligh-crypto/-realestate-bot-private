@@ -17,6 +17,8 @@ from publisher import (
     get_property_for_publish,
 )
 
+from phone_utils import normalize_iran_phone
+
 from visit_ops_group import (
     get_visit_ops_target,
     telegram_thread_kwargs,
@@ -34,7 +36,6 @@ from visit_leads import (
     get_unnotified_visit_request_ids,
     get_visitable_property,
     mark_visit_notified,
-    normalize_iran_phone,
     save_customer_phone,
     set_pending_visit,
     upsert_customer_profile,
