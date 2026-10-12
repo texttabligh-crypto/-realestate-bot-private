@@ -595,7 +595,6 @@ def property_card_text(row, *, index=None, heading=None):
         final_url = f"https://t.me/{dest}/{msg_id}"
     if final_url:
         lines.append(f"🔗 مشاهده فایل: {final_url}")
-    lines.extend(["", OPT_OUT_TEXT])
     return "\n".join(lines)
 
 
@@ -766,6 +765,10 @@ def search_page(subscription_id, telegram_user_id, offset=0):
             lines.extend(["", "──────────────", ""])
         lines.append("برای بازدید کافی است کد واحد را همراه کلمه «بازدید» بفرستید.")
 
+    # Keep the cancellation guidance once at the bottom of the
+    # complete page instead of repeating it inside every property card.
+    lines.extend(["", OPT_OUT_TEXT])
+
     nav = []
     if offset > 0:
         nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"sc_s_{subscription_id}_{max(0, offset-PAGE_SIZE)}"))
@@ -869,6 +872,9 @@ async def run_search_watch_once(application):
         if not rows:
             _touch_scan(subscription_id)
             continue
+
+        sent_any = False
+
         for row in rows:
             # Recheck that the subscription is still active. A newer search or «لغو» wins immediately.
             sub = get_subscription(subscription_id, telegram_user_id)
@@ -881,6 +887,7 @@ async def run_search_watch_once(application):
                     disable_web_page_preview=True,
                 )
                 _mark_seen(subscription_id, int(row[0]), notified=True)
+                sent_any = True
             except Exception:
                 logging.exception(
                     "Smart search notification failed subscription=%s user=%s property=%s",
@@ -890,6 +897,20 @@ async def run_search_watch_once(application):
                 )
                 # Do not mark as seen so a transient Telegram failure can retry later.
                 break
+
+        if sent_any:
+            try:
+                await application.bot.send_message(
+                    chat_id=telegram_user_id,
+                    text=OPT_OUT_TEXT,
+                )
+            except Exception:
+                logging.exception(
+                    "Smart search opt-out footer failed "
+                    "subscription=%s user=%s",
+                    subscription_id,
+                    telegram_user_id,
+                )
 
 
 async def _search_watch_loop(application):
