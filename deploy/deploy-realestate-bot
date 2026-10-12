@@ -69,8 +69,14 @@ rollback() {
     fi
 
     cd "${TARGET}"
-    docker compose build bot partner_hub
-    docker compose up -d --no-deps bot partner_hub
+    docker compose \
+        -f "${SOURCE}/docker-compose.yml" \
+        --project-directory "${TARGET}" \
+        build bot partner_hub
+    docker compose \
+        -f "${SOURCE}/docker-compose.yml" \
+        --project-directory "${TARGET}" \
+        up -d --no-deps bot partner_hub
 
     echo "ROLLBACK_COMPLETE: original exit code ${exit_code}"
     exit "${exit_code}"
