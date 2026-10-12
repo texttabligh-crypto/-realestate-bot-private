@@ -20,7 +20,10 @@ from property_filter import classify_property
 from property_parser import parse_property, parse_dynamic_attributes, parse_rule_attributes, parse_source_unit_code
 from publisher import get_property_for_publish, build_publish_text, publish_property, get_property_media, republish_property, get_destination_channel
 
-from scheduler import start_scheduler
+from scheduler import (
+    log_scheduler_health_snapshot,
+    start_scheduler,
+)
 from visit_flow import (
     handle_visit_start,
     handle_visit_contact,
@@ -8980,6 +8983,11 @@ async def post_init(application):
     start_destination_public_price_watcher(application)
     start_source_deleted_posts_watcher(application)
     start_explicit_source_feature_repair(application)
+
+    # Let startup workers emit their immediate errors first, then place
+    # the scheduler snapshot at the end of the deployment health log.
+    await asyncio.sleep(2)
+    log_scheduler_health_snapshot()
 
     logging.info(
         "Automatic scheduler initialized."
