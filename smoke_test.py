@@ -67,6 +67,13 @@ checks = {
             "has_storage",
         )
     ),
+    "automatic_latest_search_subscription": (
+        "activate_search_subscription(" in ai
+        and "subscription_id = result[3]" in ai
+        and "The newest confirmed search is active automatically" in smart
+        and "می‌خواین در روزهای آینده هم هر فایل جدیدی" not in smart
+        and "عضویت شما در این دسته فعال شد" in showcase
+    ),
     "single_opt_out_footer": (
         'lines.extend(["", OPT_OUT_TEXT])' in ai
         and "sent_any = False" in ai
