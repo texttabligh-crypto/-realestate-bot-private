@@ -9,6 +9,7 @@ NAMES = (
     "shahfile_smart.py",
     "customer_showcase.py",
     "crm_panel.py",
+    "crm_campaign_hub.py",
     "property_parser.py",
     "publisher.py",
     "visit_flow.py",
@@ -26,6 +27,7 @@ ai = files["shahfile_ai.py"]
 smart = files["shahfile_smart.py"]
 showcase = files["customer_showcase.py"]
 crm = files["crm_panel.py"]
+campaign_hub = files["crm_campaign_hub.py"]
 parser = files["property_parser.py"]
 publisher = files["publisher.py"]
 visit_flow = files["visit_flow.py"]
