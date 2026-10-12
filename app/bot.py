@@ -8698,6 +8698,43 @@ def _set_explicit_no_elevator(property_id):
             return changed
 
 
+def _source_deed_repair_rows():
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (p.id)
+                    p.id,
+                    ps.source_raw_text,
+                    pa.attribute_value
+                FROM properties p
+                JOIN property_sources ps
+                  ON ps.property_id = p.id
+                 AND ps.is_active = TRUE
+                LEFT JOIN property_attributes pa
+                  ON pa.property_id = p.id
+                 AND pa.attribute_key = 'deed_type'
+                WHERE p.status = 'ACTIVE'
+                  AND p.deleted_from_channel_at IS NULL
+                  AND ps.source_raw_text IS NOT NULL
+                  AND ps.source_raw_text <> ''
+                  AND ps.source_raw_text LIKE '%%سند%%'
+                ORDER BY
+                    p.id,
+                    ps.is_primary DESC,
+                    ps.id DESC
+                """
+            )
+            return cur.fetchall()
+
+
+def _parsed_deed_attribute(source_raw_text):
+    for item in parse_dynamic_attributes(source_raw_text):
+        if item.get("attribute_key") == "deed_type":
+            return item
+    return None
+
+
 async def repair_explicit_source_feature_mismatches(application):
     negative_property_ids = set()
 
@@ -8708,6 +8745,28 @@ async def repair_explicit_source_feature_mismatches(application):
             negative_property_ids.add(int(property_id))
 
     repaired = []
+    deed_repairs = []
+
+    for property_id, source_raw_text, current_value in _source_deed_repair_rows():
+        deed_attribute = _parsed_deed_attribute(source_raw_text)
+
+        if not deed_attribute:
+            continue
+
+        new_value = deed_attribute.get("attribute_value")
+
+        if not new_value or new_value == current_value:
+            continue
+
+        # Do not replace a useful exact value with a generic word.
+        if new_value in {"دارد", "موجود"}:
+            continue
+
+        save_property_attributes(
+            property_id,
+            [deed_attribute],
+        )
+        deed_repairs.append(int(property_id))
 
     for property_id in sorted(negative_property_ids):
         if not _set_explicit_no_elevator(property_id):
@@ -8729,6 +8788,20 @@ async def repair_explicit_source_feature_mismatches(application):
 
         await asyncio.sleep(0.35)
 
+    for property_id in sorted(set(deed_repairs) - set(repaired)):
+        try:
+            await refresh_published_property_post(
+                application.bot,
+                property_id,
+            )
+        except Exception:
+            logging.exception(
+                "Exact deed type post refresh failed: "
+                "property_id=%s",
+                property_id,
+            )
+        await asyncio.sleep(0.35)
+
     if repaired:
         try:
             await queue_targeted_category_sync(
@@ -8743,8 +8816,9 @@ async def repair_explicit_source_feature_mismatches(application):
 
     logging.info(
         "Explicit source feature repair completed: "
-        "no_elevator=%s",
+        "no_elevator=%s deed_type=%s",
         len(repaired),
+        len(deed_repairs),
     )
 
 
