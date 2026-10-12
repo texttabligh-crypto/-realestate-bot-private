@@ -814,6 +814,32 @@ async def run_scheduler_tick(application):
             return
 
         except Exception as exc:
+            error_text = str(exc)
+            stale_property = (
+                " is not ACTIVE" in error_text
+                or "not found" in error_text.lower()
+            )
+
+            if stale_property:
+                logging.warning(
+                    "Scheduler skipped stale property_id=%s: %s",
+                    property_id,
+                    error_text,
+                )
+                set_queue_status(
+                    property_id,
+                    "SKIPPED",
+                    error_text[:2000],
+                )
+                record_scheduler_attempt(
+                    window["id"],
+                    property_id,
+                    "SKIPPED_STALE",
+                )
+                # A stale row is not a publishing attempt and must
+                # not consume the full scheduling interval.
+                continue
+
             logging.exception(
                 "Scheduler failed property_id=%s",
                 property_id,
@@ -822,7 +848,7 @@ async def run_scheduler_tick(application):
             set_queue_status(
                 property_id,
                 "FAILED",
-                str(exc)[:2000],
+                error_text[:2000],
             )
 
             record_scheduler_attempt(
@@ -848,6 +874,7 @@ def log_scheduler_health_snapshot():
     """Log a compact, non-sensitive operational snapshot."""
     ensure_scheduler_publish_log()
     ensure_scheduler_attempt_log()
+    ensure_scheduler_runtime_state()
 
     with db_connect() as conn:
         with conn.cursor() as cur:
@@ -937,13 +964,32 @@ def log_scheduler_health_snapshot():
             )
             recent_failures = cur.fetchall()
 
+            cur.execute(
+                """
+                SELECT
+                    worker_name,
+                    TO_CHAR(
+                        last_started_at AT TIME ZONE 'Asia/Tehran',
+                        'YYYY-MM-DD HH24:MI:SS'
+                    ),
+                    TO_CHAR(
+                        last_finished_at AT TIME ZONE 'Asia/Tehran',
+                        'YYYY-MM-DD HH24:MI:SS'
+                    ),
+                    LEFT(COALESCE(last_error, ''), 300)
+                FROM scheduler_runtime_state
+                ORDER BY worker_name
+                """
+            )
+            runtime_workers = cur.fetchall()
+
     eligible_count = len(get_queue_candidates(limit=500))
 
     logging.info(
         "SCHEDULER_HEALTH tehran_now=%s windows=%s "
         "queue_counts=%s eligible=%s attempts_36h=%s "
         "published_36h=%s recent_attempts=%s "
-        "recent_failures=%s",
+        "recent_failures=%s runtime=%s",
         datetime.now(TEHRAN).isoformat(timespec="seconds"),
         windows,
         queue_counts,
@@ -952,6 +998,7 @@ def log_scheduler_health_snapshot():
         published_36h,
         recent_attempts,
         recent_failures,
+        runtime_workers,
     )
 
 
@@ -1122,8 +1169,8 @@ async def scheduler_watchdog_loop(application):
         "Scheduler watchdog loop started."
     )
 
-    # Stagger the watchdog from the primary worker.
-    await asyncio.sleep(10)
+    # Let the primary tick first, then establish the backup heartbeat.
+    await asyncio.sleep(1)
 
     while True:
         try:
