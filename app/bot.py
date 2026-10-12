@@ -8138,6 +8138,82 @@ def _destination_price_watch_observe(
             )
 
 
+def _mark_destination_post_deleted(
+    property_id,
+):
+    """
+    Atomically remove a Telegram-deleted destination post from every
+    live customer search surface. Returns True only when this call
+    changed an ACTIVE property.
+    """
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE properties
+                SET
+                    status = 'INACTIVE',
+                    deleted_from_channel_at = COALESCE(
+                        deleted_from_channel_at,
+                        NOW()
+                    ),
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND status = 'ACTIVE'
+                  AND deleted_from_channel_at IS NULL
+                RETURNING id
+                """,
+                (property_id,),
+            )
+
+            changed = cur.fetchone() is not None
+
+            if changed:
+                cur.execute(
+                    """
+                    UPDATE publish_queue
+                    SET
+                        queue_status = 'SKIPPED',
+                        last_error =
+                            'Destination post deleted from Telegram',
+                        updated_at = NOW()
+                    WHERE property_id = %s
+                      AND queue_status IN (
+                          'NEW',
+                          'PARSED',
+                          'READY',
+                          'SCHEDULED',
+                          'PENDING_DUPLICATE',
+                          'FAILED'
+                      )
+                    """,
+                    (property_id,),
+                )
+
+                cur.execute(
+                    """
+                    UPDATE republish_queue
+                    SET
+                        queue_status = 'CANCELLED',
+                        last_error =
+                            'Destination post deleted from Telegram',
+                        updated_at = NOW()
+                    WHERE property_id = %s
+                      AND queue_status IN (
+                          'READY',
+                          'SCHEDULED',
+                          'PROCESSING'
+                      )
+                    """,
+                    (property_id,),
+                )
+
+        conn.commit()
+
+    return changed
+
+
 def _destination_price_watch_property_state(
     property_id,
 ):
@@ -8289,6 +8365,58 @@ async def run_destination_public_price_watch_tick(
     baseline_count = 0
     same_count = 0
     changed_count = 0
+    deleted_count = 0
+
+    # A channel page may legitimately omit old posts because of
+    # pagination limits. Verify every unobserved property through its
+    # own Telegram embed URL before deactivating it, so stale catalog
+    # entries disappear without false positives.
+    for message_id in (
+        set(watched) - set(observed)
+    ):
+        (
+            property_id,
+            _db_message_id,
+            _current_price,
+            _manual_price,
+        ) = watched[message_id]
+
+        exists = await asyncio.to_thread(
+            source_public_post_exists,
+            destination_username,
+            message_id,
+        )
+
+        if exists is not False:
+            continue
+
+        if not _mark_destination_post_deleted(
+            property_id
+        ):
+            continue
+
+        deleted_count += 1
+
+        logging.warning(
+            "DESTINATION public post missing; "
+            "property deactivated: property_id=%s "
+            "message_id=%s",
+            property_id,
+            message_id,
+        )
+
+        try:
+            await queue_targeted_category_sync(
+                application.bot,
+                [property_id],
+                reason="destination-public-post-deleted",
+            )
+        except Exception:
+            logging.exception(
+                "Category sync after public deletion failed: "
+                "property_id=%s",
+                property_id,
+            )
 
     for message_id, public_text in (
         observed.items()
@@ -8450,12 +8578,13 @@ async def run_destination_public_price_watch_tick(
     logging.info(
         "DESTINATION public price scan: "
         "watched=%s observed=%s "
-        "baseline=%s same=%s changed=%s",
+        "baseline=%s same=%s changed=%s deleted=%s",
         len(watched),
         len(observed),
         baseline_count,
         same_count,
         changed_count,
+        deleted_count,
     )
 
 
