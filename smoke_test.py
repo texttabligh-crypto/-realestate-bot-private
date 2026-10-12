@@ -15,6 +15,7 @@ NAMES = (
     "visit_flow.py",
     "visit_leads.py",
     "visit_ops_group.py",
+    "scheduler.py",
 )
 
 files = {}
@@ -34,8 +35,20 @@ publisher = files["publisher.py"]
 visit_flow = files["visit_flow.py"]
 visit_leads = files["visit_leads.py"]
 visit_ops = files["visit_ops_group.py"]
+scheduler = files["scheduler.py"]
 
 checks = {
+    "scheduler_supervisor_watchdog": all(
+        value in scheduler
+        for value in (
+            "scheduler_runtime_state",
+            "run_guarded_scheduler_tick",
+            "scheduler_watchdog_loop",
+            "scheduler_watchdog_task",
+            "asyncio.wait_for(",
+            "SKIPPED_STALE",
+        )
+    ),
     "manager_buttons": all(
         value in bot
         for value in (
