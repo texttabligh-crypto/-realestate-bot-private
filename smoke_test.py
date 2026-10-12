@@ -2,7 +2,12 @@ from pathlib import Path
 import ast
 
 
-ROOT = Path(__file__).resolve().parent / "app"
+PROJECT_ROOT = Path(__file__).resolve().parent
+ROOT = PROJECT_ROOT / "app"
+PARTNER_APP = (PROJECT_ROOT / "partner_hub" / "app.py").read_text(
+    encoding="utf-8"
+)
+ast.parse(PARTNER_APP)
 NAMES = (
     "bot.py",
     "shahfile_ai.py",
@@ -38,6 +43,17 @@ visit_ops = files["visit_ops_group.py"]
 scheduler = files["scheduler.py"]
 
 checks = {
+    "partner_hub_blue_menu": all(
+        value in PARTNER_APP
+        for value in (
+            "BotCommand",
+            "MenuButtonCommands",
+            "configure_blue_menu",
+            'BotCommand("start", "شروع ربات")',
+            'BotCommand("menu", "منوی اصلی")',
+            "await configure_blue_menu(app)",
+        )
+    ),
     "scheduler_supervisor_watchdog": all(
         value in scheduler
         for value in (

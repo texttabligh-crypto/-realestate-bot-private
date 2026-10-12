@@ -37,7 +37,8 @@ jobs:
 
       - name: Validate source
         run: |
-          python3 -m compileall -q app
+          python3 -m compileall -q app partner_hub
+          bash -n deploy/deploy-realestate-bot
           python3 smoke_test.py
 
       - name: Deploy through restricted root wrapper
