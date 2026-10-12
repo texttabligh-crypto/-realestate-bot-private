@@ -844,10 +844,90 @@ async def run_scheduler_tick(application):
     )
 
 
+def log_scheduler_health_snapshot():
+    """Log a compact, non-sensitive operational snapshot."""
+    ensure_scheduler_publish_log()
+    ensure_scheduler_attempt_log()
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    weekday,
+                    start_time::TEXT,
+                    end_time::TEXT,
+                    interval_minutes,
+                    max_posts,
+                    pause_start::TEXT,
+                    pause_end::TEXT
+                FROM schedule_windows
+                WHERE is_active = TRUE
+                ORDER BY weekday, start_time, id
+                """
+            )
+            windows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT queue_status, COUNT(*)
+                FROM publish_queue
+                GROUP BY queue_status
+                ORDER BY queue_status
+                """
+            )
+            queue_counts = dict(cur.fetchall())
+
+            cur.execute(
+                """
+                SELECT attempt_status, COUNT(*)
+                FROM scheduler_attempt_log
+                WHERE attempted_at >= NOW() - INTERVAL '36 hours'
+                GROUP BY attempt_status
+                ORDER BY attempt_status
+                """
+            )
+            attempts = dict(cur.fetchall())
+
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM scheduler_publish_log
+                WHERE published_at >= NOW() - INTERVAL '36 hours'
+                """
+            )
+            published_36h = int(cur.fetchone()[0] or 0)
+
+    eligible_count = len(get_queue_candidates(limit=500))
+
+    logging.info(
+        "SCHEDULER_HEALTH tehran_now=%s windows=%s "
+        "queue_counts=%s eligible=%s attempts_36h=%s "
+        "published_36h=%s",
+        datetime.now(TEHRAN).isoformat(timespec="seconds"),
+        windows,
+        queue_counts,
+        eligible_count,
+        attempts,
+        published_36h,
+    )
+
+
 async def scheduler_loop(application):
     logging.info(
         "Scheduler background loop started."
     )
+
+    # Emit after the other startup workers so deployment logs retain
+    # the scheduler state even when another worker reports an error.
+    await asyncio.sleep(1)
+    try:
+        log_scheduler_health_snapshot()
+    except Exception:
+        logging.exception(
+            "Scheduler health snapshot failed"
+        )
 
     while True:
         try:
