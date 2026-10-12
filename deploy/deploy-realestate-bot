@@ -76,7 +76,7 @@ rollback() {
     docker compose \
         -f "${SOURCE}/docker-compose.yml" \
         --project-directory "${TARGET}" \
-        up -d --no-deps bot partner_hub
+        up -d --no-deps --force-recreate bot partner_hub
 
     echo "ROLLBACK_COMPLETE: original exit code ${exit_code}"
     exit "${exit_code}"
@@ -107,7 +107,7 @@ python3 -m compileall -q "${TARGET}/app" "${TARGET}/partner_hub"
 
 cd "${TARGET}"
 docker compose build bot partner_hub
-docker compose up -d --no-deps bot partner_hub
+docker compose up -d --no-deps --force-recreate bot partner_hub
 
 healthy=0
 for _ in $(seq 1 15); do
