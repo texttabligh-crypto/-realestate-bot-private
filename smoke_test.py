@@ -9,6 +9,7 @@ NAMES = (
     "shahfile_smart.py",
     "customer_showcase.py",
     "crm_panel.py",
+    "crm_campaign_hub.py",
     "property_parser.py",
     "publisher.py",
     "visit_flow.py",
@@ -26,6 +27,7 @@ ai = files["shahfile_ai.py"]
 smart = files["shahfile_smart.py"]
 showcase = files["customer_showcase.py"]
 crm = files["crm_panel.py"]
+campaign_hub = files["crm_campaign_hub.py"]
 parser = files["property_parser.py"]
 publisher = files["publisher.py"]
 visit_flow = files["visit_flow.py"]
@@ -138,6 +140,38 @@ checks = {
             "start_campaign_watch_worker(application)",
             "customer_campaigns",
             "ساخت لینک جذب مشتری",
+        )
+    ),
+    "crm_campaign_broadcast_and_support": all(
+        value in campaign_hub
+        for value in (
+            "crm_campaign_broadcasts",
+            "crm_campaign_broadcast_deliveries",
+            "crm_support_tickets",
+            "crm_campaigns",
+            "crm_support_inbox",
+            "escalate_customer_question",
+            "CRM campaign broadcast worker started.",
+            "phone_collected_at IS NOT NULL",
+        )
+    ) and all(
+        value in crm
+        for value in (
+            "CRM CAMPAIGN HUB V4",
+            "🎯 دسته‌های لینک",
+            "💬 سؤال‌های مشتریان",
+        )
+    ) and all(
+        value in smart
+        for value in (
+            "escalate_customer_question",
+            "سؤالتون برای مشاور ارسال شد",
+        )
+    ) and all(
+        value in bot
+        for value in (
+            "ensure_campaign_crm_schema()",
+            "start_campaign_broadcast_worker(application)",
         )
     ),
     "first_visit_funding_profile": all(

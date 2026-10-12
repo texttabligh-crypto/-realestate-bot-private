@@ -78,6 +78,10 @@ from shahfile_smart import (
     handle_manager_text as handle_smart_manager_text,
 )
 from shahfile_ai import start_search_watch_worker
+from crm_campaign_hub import (
+    ensure_schema as ensure_campaign_crm_schema,
+    start_worker as start_campaign_broadcast_worker,
+)
 from customer_showcase import (
     ensure_showcase_schema,
     manager_filters_to_public,
@@ -8535,7 +8539,9 @@ async def post_init(application):
     ensure_footer_bulk_refresh_schema()
     ensure_smart_schema()
     ensure_showcase_schema()
+    ensure_campaign_crm_schema()
     start_campaign_watch_worker(application)
+    start_campaign_broadcast_worker(application)
     start_visit_reminder_worker(application)
     start_visit_notification_worker(application)
     start_search_watch_worker(application)

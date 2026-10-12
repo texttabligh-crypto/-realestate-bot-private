@@ -2002,6 +2002,22 @@ async def handle_customer_text(update, context):
             await update.message.reply_text("📍 محله/منطقه حدودی ملک رو بفرستید.\nمثال: رشدیه-بوستان")
             return True
 
+        # A simple greeting still gets the normal welcome. A real question that
+        # neither rules nor AI could answer becomes a tracked CRM support ticket.
+        if normalized_text.lower() in {"سلام", "درود", "hello", "hi", "شروع", "منو"}:
+            await update.message.reply_text(_welcome_text(), reply_markup=_start_choice_keyboard())
+            return True
+
+        from crm_campaign_hub import escalate_customer_question
+        if await escalate_customer_question(
+            context.bot, user, customer_id, text
+        ):
+            await update.message.reply_text(
+                "سؤالتون برای مشاور ارسال شد ✅\n"
+                "پاسخ همین‌جا براتون میاد."
+            )
+            return True
+
         await update.message.reply_text(_welcome_text(), reply_markup=_start_choice_keyboard())
         return True
 
