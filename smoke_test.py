@@ -67,6 +67,12 @@ checks = {
             "has_storage",
         )
     ),
+    "single_opt_out_footer": (
+        'lines.extend(["", OPT_OUT_TEXT])' in ai
+        and "sent_any = False" in ai
+        and "text=OPT_OUT_TEXT" in ai
+        and 'lines.extend(["", OPT_OUT_TEXT])\n    return "\\n".join(lines)' not in ai
+    ),
     "simple_customer_confirmation": all(
         value in smart
         for value in (
