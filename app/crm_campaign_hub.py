@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-from datetime import datetime, timedelta, timezone
 
 import psycopg
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -60,6 +59,14 @@ def ensure_schema():
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_crm_campaign_delivery_queue
                 ON crm_campaign_broadcast_deliveries(status, next_attempt_at, id)
+            """)
+            # A container restart may interrupt a claimed item between the
+            # Telegram call and the database update. Return such items to the
+            # durable queue so no audience member is silently lost.
+            cur.execute("""
+                UPDATE crm_campaign_broadcast_deliveries
+                SET status='PENDING', next_attempt_at=NOW(), updated_at=NOW()
+                WHERE status='SENDING'
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS crm_support_tickets (
@@ -453,7 +460,7 @@ def _open_or_create_ticket(customer_id, telegram_user_id, question_text):
 
 
 async def escalate_customer_question(bot, user, customer_id, question_text):
-    question = (question_text or "").strip()
+    question = (question_text or "").strip()[:2000]
     if not question:
         return False
     ticket_id, created = await asyncio.to_thread(
