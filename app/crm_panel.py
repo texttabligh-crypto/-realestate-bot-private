@@ -6521,21 +6521,27 @@ async def handle_crm_button(update, context, session):
 # =========================================================
 
 _crm_campaign_v4_legacy_build_main_menu = build_main_menu
+_crm_campaign_v4_legacy_customers_keyboard = _customers_keyboard
 _crm_campaign_v4_legacy_handle_button = handle_crm_button
 _crm_campaign_v4_legacy_handle_text = handle_crm_text
 
 
 def build_main_menu(session, legacy_keyboard):
-    markup = _crm_campaign_v4_legacy_build_main_menu(session, legacy_keyboard)
+    # Keep the main menu compact. Campaign tools live inside CRM.
+    return _crm_campaign_v4_legacy_build_main_menu(session, legacy_keyboard)
+
+
+def _customers_keyboard(session, offset=0, limit=20):
+    markup, total = _crm_campaign_v4_legacy_customers_keyboard(
+        session, offset, limit
+    )
     rows = [list(row) for row in (markup.inline_keyboard if markup else [])]
-    if has_permission(session, "customers_manage"):
-        campaign_row = [
-            InlineKeyboardButton("🎯 دسته‌های لینک", callback_data="crm_campaigns"),
-            InlineKeyboardButton("💬 سؤال‌های مشتریان", callback_data="crm_support_inbox"),
-        ]
-        insert_at = max(0, len(rows) - 1)
-        rows.insert(insert_at, campaign_row)
-    return InlineKeyboardMarkup(rows)
+    insert_at = max(0, len(rows) - 1)
+    rows.insert(insert_at, [
+        InlineKeyboardButton("🎯 دسته‌های لینک", callback_data="crm_campaigns"),
+        InlineKeyboardButton("💬 سؤال‌های مشتریان", callback_data="crm_support_inbox"),
+    ])
+    return InlineKeyboardMarkup(rows), total
 
 
 async def handle_crm_button(update, context, session):
