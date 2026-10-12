@@ -140,6 +140,38 @@ checks = {
             "ساخت لینک جذب مشتری",
         )
     ),
+    "crm_campaign_broadcast_and_support": all(
+        value in campaign_hub
+        for value in (
+            "crm_campaign_broadcasts",
+            "crm_campaign_broadcast_deliveries",
+            "crm_support_tickets",
+            "crm_campaigns",
+            "crm_support_inbox",
+            "escalate_customer_question",
+            "CRM campaign broadcast worker started.",
+            "phone_collected_at IS NOT NULL",
+        )
+    ) and all(
+        value in crm
+        for value in (
+            "CRM CAMPAIGN HUB V4",
+            "🎯 دسته‌های لینک",
+            "💬 سؤال‌های مشتریان",
+        )
+    ) and all(
+        value in smart
+        for value in (
+            "escalate_customer_question",
+            "سؤالتون برای مشاور ارسال شد",
+        )
+    ) and all(
+        value in bot
+        for value in (
+            "ensure_campaign_crm_schema()",
+            "start_campaign_broadcast_worker(application)",
+        )
+    ),
     "first_visit_funding_profile": all(
         value in smart
         for value in (
