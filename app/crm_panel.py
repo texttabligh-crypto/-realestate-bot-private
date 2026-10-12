@@ -10,6 +10,7 @@ import bcrypt
 import psycopg
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import RetryAfter, TimedOut
+from visit_ops_group import get_visit_ops_target, telegram_thread_kwargs
 
 DB_HOST = os.getenv("POSTGRES_HOST", "postgres")
 DB_NAME = os.getenv("POSTGRES_DB")
@@ -1744,8 +1745,22 @@ def _mark_reminder_sent(visit_id):
 
 async def run_visit_reminders(application):
     for visit_id, visit_at, assigned_user_id, unit_code, post_url, first_name, last_name, phone in _due_visit_reminders():
-        recipient_ids = _visit_reminder_recipient_telegram_ids(assigned_user_id)
-        if not recipient_ids:
+        visit_group = get_visit_ops_target()
+        if visit_group:
+            recipients = [
+                (
+                    int(visit_group[0]),
+                    telegram_thread_kwargs(visit_group),
+                )
+            ]
+        else:
+            recipients = [
+                (int(recipient_id), {})
+                for recipient_id in _visit_reminder_recipient_telegram_ids(
+                    assigned_user_id
+                )
+            ]
+        if not recipients:
             continue
 
         name = " ".join(x for x in (first_name, last_name) if x).strip() or "بدون نام"
@@ -1762,12 +1777,13 @@ async def run_visit_reminders(application):
             text += f"\n🔗 فایل: {post_url}"
 
         sent_count = 0
-        for telegram_id in recipient_ids:
+        for telegram_id, thread_kwargs in recipients:
             try:
                 await application.bot.send_message(
                     chat_id=telegram_id,
                     text=text,
                     disable_web_page_preview=True,
+                    **thread_kwargs,
                 )
                 sent_count += 1
             except Exception:

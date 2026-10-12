@@ -21,6 +21,7 @@ from telegram import (
 
 from crm_panel import parse_visit_datetime, TEHRAN
 from publisher import publish_property
+from visit_ops_group import get_visit_ops_target, telegram_thread_kwargs
 from shahfile_ai import (
     ensure_ai_schema,
     extract_ai_intent,
@@ -944,32 +945,49 @@ async def notify_owner_visit(bot, approval_id):
     if not detail:
         return 0
     sent = 0
-    recipient_ids = set(_owner_telegram_ids())
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT DISTINCT us.telegram_user_id
-                FROM smart_visit_approvals sva
-                JOIN visit_requests vr ON vr.id=sva.visit_request_id
-                JOIN user_sessions us ON us.user_id=vr.assigned_user_id
-                WHERE sva.id=%s AND us.is_active=TRUE
-                  AND us.telegram_user_id IS NOT NULL
-                """,
-                (approval_id,),
+    visit_group = get_visit_ops_target()
+    if visit_group:
+        recipients = [
+            (
+                int(visit_group[0]),
+                telegram_thread_kwargs(visit_group),
             )
-            recipient_ids.update(row[0] for row in cur.fetchall() if row[0])
-    for telegram_id in recipient_ids:
+        ]
+    else:
+        recipient_ids = set(_owner_telegram_ids())
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT us.telegram_user_id
+                    FROM smart_visit_approvals sva
+                    JOIN visit_requests vr ON vr.id=sva.visit_request_id
+                    JOIN user_sessions us ON us.user_id=vr.assigned_user_id
+                    WHERE sva.id=%s AND us.is_active=TRUE
+                      AND us.telegram_user_id IS NOT NULL
+                    """,
+                    (approval_id,),
+                )
+                recipient_ids.update(row[0] for row in cur.fetchall() if row[0])
+        recipients = [(int(telegram_id), {}) for telegram_id in recipient_ids]
+
+    for telegram_id, thread_kwargs in recipients:
         try:
             await bot.send_message(
                 chat_id=telegram_id,
                 text=_visit_manager_text(detail),
                 reply_markup=_visit_manager_keyboard(approval_id),
                 disable_web_page_preview=True,
+                **thread_kwargs,
             )
             sent += 1
         except Exception:
-            logging.exception("smart visit manager notification failed approval_id=%s", approval_id)
+            logging.exception(
+                "smart visit manager notification failed "
+                "approval_id=%s recipient=%s",
+                approval_id,
+                telegram_id,
+            )
     return sent
 
 
