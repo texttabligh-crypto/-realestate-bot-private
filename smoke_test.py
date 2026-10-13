@@ -248,6 +248,8 @@ checks = {
         for value in (
             "_extended_location_repair_rows",
             "repair_extended_source_locations",
+            "delayed_extended_source_location_repair",
+            "await asyncio.sleep(15)",
             "current_address_text not in new_address_text",
             "start_extended_source_location_repair(application)",
         )
