@@ -239,9 +239,9 @@ checks = {
     "source_location_fidelity_and_backfill": all(
         value in parser
         for value in (
-            "headline_location_match",
-            "پیش فروش آپارتمان | ولیعصر لیدای جدید",
-            "more precise «ولیعصر لیدای جدید»",
+            "_extract_headline_location",
+            "strict extension of a shorter",
+            "headline_location",
         )
     ) and all(
         value in bot
