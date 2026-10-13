@@ -8927,6 +8927,34 @@ FORCED_SOURCE_ADDRESS_BY_UNIT_CODE = {
 }
 
 
+def _forced_location_repair_rows():
+    """Resolve reported public unit codes without requiring a source row."""
+    unit_codes = list(
+        FORCED_SOURCE_ADDRESS_BY_UNIT_CODE
+    )
+
+    if not unit_codes:
+        return []
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    p.id,
+                    p.unit_code,
+                    p.address_text
+                FROM properties p
+                WHERE p.unit_code::text = ANY(%s)
+                  AND p.published_message_id IS NOT NULL
+                  AND p.deleted_from_channel_at IS NULL
+                ORDER BY p.id
+                """,
+                (unit_codes,),
+            )
+            return cur.fetchall()
+
+
 def _extended_location_repair_rows():
     """Return every live source record eligible for location repair."""
     with db_connect() as conn:
@@ -8957,6 +8985,49 @@ def _extended_location_repair_rows():
 
 
 async def repair_extended_source_locations(application):
+    forced_repaired = []
+
+    # Apply explicit corrections directly by the same public unit code that
+    # appears in the channel post. This path deliberately does not depend on
+    # property_sources, because older rows may have no active/raw source.
+    for property_id, unit_code, current_address in (
+        _forced_location_repair_rows()
+    ):
+        unit_code_text = str(unit_code or "").strip()
+        forced_address = (
+            FORCED_SOURCE_ADDRESS_BY_UNIT_CODE.get(
+                unit_code_text
+            )
+        )
+
+        if (
+            not forced_address
+            or str(current_address or "").strip()
+            == forced_address
+        ):
+            continue
+
+        save_property_address(
+            property_id,
+            forced_address,
+        )
+
+        try:
+            await refresh_published_property_post(
+                application.bot,
+                property_id,
+            )
+            forced_repaired.append(int(property_id))
+        except Exception:
+            logging.exception(
+                "Forced source location post refresh failed: "
+                "property_id=%s unit_code=%s",
+                property_id,
+                unit_code_text,
+            )
+
+        await asyncio.sleep(0.35)
+
     source_rows = _extended_location_repair_rows()
     best_candidates = {}
 
@@ -9051,7 +9122,8 @@ async def repair_extended_source_locations(application):
 
     logging.info(
         "Extended source location repair completed: "
-        "source_rows=%s candidates=%s posts=%s",
+        "forced_posts=%s source_rows=%s candidates=%s posts=%s",
+        len(forced_repaired),
         len(source_rows),
         len(best_candidates),
         len(repaired),
