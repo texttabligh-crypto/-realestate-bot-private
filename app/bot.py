@@ -8922,6 +8922,111 @@ async def repair_explicit_source_feature_mismatches(application):
     )
 
 
+def _extended_location_repair_rows():
+    """Return live posts whose source contains the reported named subarea."""
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (p.id)
+                    p.id,
+                    p.address_text,
+                    ps.source_raw_text
+                FROM properties p
+                JOIN property_sources ps
+                  ON ps.property_id = p.id
+                 AND ps.is_active = TRUE
+                WHERE p.status = 'ACTIVE'
+                  AND p.deleted_from_channel_at IS NULL
+                  AND p.published_message_id IS NOT NULL
+                  AND ps.source_raw_text IS NOT NULL
+                  AND ps.source_raw_text ILIKE '%%لیدای جدید%%'
+                ORDER BY
+                    p.id,
+                    ps.is_primary DESC,
+                    ps.id DESC
+                """
+            )
+            return cur.fetchall()
+
+
+async def repair_extended_source_locations(application):
+    repaired = []
+
+    for property_id, current_address, source_raw_text in (
+        _extended_location_repair_rows()
+    ):
+        parsed = parse_property(source_raw_text)
+        new_address = parsed.get("address_text")
+
+        if (
+            not new_address
+            or "لیدای جدید" not in new_address
+        ):
+            continue
+
+        dynamic_attributes = parse_dynamic_attributes(
+            source_raw_text
+        )
+        rule_attributes = parse_rule_attributes(
+            source_raw_text,
+            get_active_attribute_rules(),
+        )
+        merged_attributes = {
+            item["attribute_key"]: item
+            for item in dynamic_attributes + rule_attributes
+        }
+
+        save_property_address(
+            property_id,
+            new_address,
+        )
+        save_property_attributes(
+            property_id,
+            list(merged_attributes.values()),
+        )
+
+        if new_address != current_address:
+            repaired.append(int(property_id))
+
+        try:
+            await refresh_published_property_post(
+                application.bot,
+                property_id,
+            )
+        except Exception:
+            logging.exception(
+                "Extended source location post refresh failed: "
+                "property_id=%s",
+                property_id,
+            )
+
+        await asyncio.sleep(0.35)
+
+    logging.info(
+        "Extended source location repair completed: posts=%s",
+        len(repaired),
+    )
+
+
+def start_extended_source_location_repair(application):
+    existing = application.bot_data.get(
+        "extended_source_location_repair_task"
+    )
+
+    if existing and not existing.done():
+        return existing
+
+    task = asyncio.create_task(
+        repair_extended_source_locations(application),
+        name="extended_source_location_repair",
+    )
+    application.bot_data[
+        "extended_source_location_repair_task"
+    ] = task
+    return task
+
+
 def start_explicit_source_feature_repair(application):
     existing = application.bot_data.get(
         "explicit_source_feature_repair_task"
@@ -8983,6 +9088,7 @@ async def post_init(application):
     start_destination_public_price_watcher(application)
     start_source_deleted_posts_watcher(application)
     start_explicit_source_feature_repair(application)
+    start_extended_source_location_repair(application)
 
     # Let startup workers emit their immediate errors first, then place
     # the scheduler snapshot at the end of the deployment health log.
