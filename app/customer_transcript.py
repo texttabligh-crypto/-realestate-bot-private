@@ -22,7 +22,7 @@ def ensure_schema():
             ON customer_chat_history(telegram_user_id, id)""")
 
 
-def save_message(user_id, message_id, direction, body):
+def save_message(user_id, message_id, direction, body, event_time=None):
     if not body or user_id <= 0:
         return
     with db_connect() as conn:
@@ -32,9 +32,9 @@ def save_message(user_id, message_id, direction, body):
         if not conn.execute("SELECT 1 FROM customer_profiles WHERE telegram_user_id=%s LIMIT 1", (user_id,)).fetchone():
             return
         conn.execute("""INSERT INTO customer_chat_history
-            (telegram_user_id,message_id,direction,body) VALUES (%s,%s,%s,%s)
+            (telegram_user_id,message_id,direction,body,recorded_at) VALUES (%s,%s,%s,%s,COALESCE(%s,NOW()))
             ON CONFLICT (telegram_user_id,message_id,direction)
-            DO UPDATE SET body=EXCLUDED.body""", (user_id,message_id,direction,body))
+            DO UPDATE SET body=EXCLUDED.body""", (user_id,message_id,direction,body,event_time))
 
 
 async def record_message(message, direction):
@@ -46,7 +46,7 @@ async def record_message(message, direction):
     if not body:
         body = '[پیام غیرمتنی]'
     try:
-        await asyncio.to_thread(save_message, message.chat.id, message.message_id, direction, body)
+        await asyncio.to_thread(save_message, message.chat.id, message.message_id, direction, body, getattr(message, 'date', None))
     except Exception as exc:
         logging.error('Customer history write failed: %s', type(exc).__name__)
 
@@ -88,7 +88,7 @@ def history_page(user_id, offset=0):
     with db_connect() as conn:
         rows = conn.execute("""SELECT id,direction,body,recorded_at
             FROM customer_chat_history WHERE telegram_user_id=%s
-            ORDER BY id LIMIT 9 OFFSET %s""", (user_id,offset)).fetchall()
+            ORDER BY recorded_at,message_id,id LIMIT 9 OFFSET %s""", (user_id,offset)).fetchall()
     lines = ['💬 سابقهٔ گفتگو', 'پیام‌های ثبت‌شده از زمان فعال‌شدن این قابلیت؛ پیام‌های قدیمیِ ثبت‌نشده در دسترس نیستند.']
     for _, direction, body, created in rows[:8]:
         label = 'مشتری' if direction == 'customer' else 'بات / مشاور'
