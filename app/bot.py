@@ -9200,6 +9200,45 @@ def start_explicit_source_feature_repair(application):
     return task
 
 
+def log_reported_location_diagnostics():
+    """Read-only diagnostics for reported public posts; no contact data."""
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT p.id, p.unit_code, p.status,
+                           p.address_text, p.raw_text,
+                           p.published_message_id,
+                           p.deleted_from_channel_at,
+                           (SELECT COUNT(*) FROM property_sources ps
+                            WHERE ps.property_id = p.id
+                              AND ps.is_active = TRUE)
+                    FROM properties p
+                    WHERE p.unit_code::text = ANY(%s)
+                    ORDER BY p.id
+                    """,
+                    (["31123", "31230", "31331", "31427"],),
+                )
+                rows = cur.fetchall()
+        for row in rows:
+            pid, code, status, address, raw, message_id, deleted, count = row
+            parsed = parse_property(raw or "").get("address_text")
+            logging.info(
+                "LOCATION_DIAGNOSTIC id=%s code=%s status=%s "
+                "stored=%r parsed=%r raw_chars=%s message=%s "
+                "deleted=%s active_sources=%s",
+                pid, code, status, address, parsed,
+                len(raw or ""), message_id, bool(deleted), count,
+            )
+        logging.info("LOCATION_DIAGNOSTIC matched_rows=%s", len(rows))
+    except Exception as exc:
+        logging.error(
+            "LOCATION_DIAGNOSTIC failed type=%s",
+            type(exc).__name__,
+        )
+
+
 async def post_init(application):
     commands = [
         BotCommand("start", "شروع ربات"),
@@ -9247,6 +9286,7 @@ async def post_init(application):
     # the scheduler snapshot at the end of the deployment health log.
     await asyncio.sleep(2)
     log_scheduler_health_snapshot()
+    log_reported_location_diagnostics()
 
     logging.info(
         "Automatic scheduler initialized."
