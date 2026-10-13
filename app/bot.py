@@ -8965,6 +8965,20 @@ def _extended_location_repair_rows():
                     p.id,
                     p.unit_code,
                     p.address_text,
+                    p.raw_text
+                FROM properties p
+                WHERE p.status = 'ACTIVE'
+                  AND p.deleted_from_channel_at IS NULL
+                  AND p.published_message_id IS NOT NULL
+                  AND p.raw_text IS NOT NULL
+                  AND BTRIM(p.raw_text) <> ''
+
+                UNION ALL
+
+                SELECT
+                    p.id,
+                    p.unit_code,
+                    p.address_text,
                     ps.source_raw_text
                 FROM properties p
                 JOIN property_sources ps
@@ -8975,10 +8989,8 @@ def _extended_location_repair_rows():
                   AND p.published_message_id IS NOT NULL
                   AND ps.source_raw_text IS NOT NULL
                   AND BTRIM(ps.source_raw_text) <> ''
-                ORDER BY
-                    p.id,
-                    ps.is_primary DESC,
-                    ps.id DESC
+
+                ORDER BY 1
                 """
             )
             return cur.fetchall()

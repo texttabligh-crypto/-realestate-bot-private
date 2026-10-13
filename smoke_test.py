@@ -259,6 +259,15 @@ checks = {
             "await asyncio.sleep(15)",
             "current_address_text not in new_address_text",
             "start_extended_source_location_repair(application)",
+            "p.raw_text",
+            "UNION ALL",
+        )
+    ) and all(
+        value in publisher
+        for value in (
+            "refresh_property_location_from_raw_text",
+            "Reparse location immediately before publish/republish",
+            "current_text in new_text",
         )
     ),
     "explicit_source_facility_repair": all(
