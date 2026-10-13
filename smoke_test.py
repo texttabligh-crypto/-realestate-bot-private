@@ -394,6 +394,17 @@ if extended_location["district"] != "ولیعصر":
 if extended_location["address_text"] != "ولیعصر لیدای جدید":
     raise SystemExit("extended location address regression")
 
+extended_location_with_short_pin = parse_property(
+    "📍 ولیعصر\n"
+    "پیش فروش آپارتمان | ولیعصر لیدای جدید\n"
+    "۱۲۵ متر | ۲ خواب"
+)
+if (
+    extended_location_with_short_pin["address_text"]
+    != "ولیعصر لیدای جدید"
+):
+    raise SystemExit("short pin masked precise headline regression")
+
 negative_elevator_samples = (
     "بدون آسانسور",
     "آسانسور ندارد",
