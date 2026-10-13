@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import bcrypt
 import psycopg
+from composite_search import composite_text_predicates
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import RetryAfter, TimedOut
 from visit_ops_group import get_visit_ops_target, telegram_thread_kwargs
@@ -876,7 +877,8 @@ def _set_visit_status(visit_id, status):
         conn.commit()
 
 def _region_rows(region, offset=0, limit=10):
-    needle = f"%{region.strip()}%"
+    clauses, params = composite_text_predicates(region)
+    predicate = " AND ".join(clauses) or "FALSE"
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -888,17 +890,16 @@ def _region_rows(region, offset=0, limit=10):
                 WHERE p.status = 'ACTIVE'
                   AND p.published_message_id IS NOT NULL
                   AND p.deleted_from_channel_at IS NULL
-                  AND (
-                    COALESCE(p.district, '') ILIKE %s
-                    OR COALESCE(p.neighborhood, '') ILIKE %s
-                  )
+                  AND (""" + predicate + """)
                 ORDER BY p.current_price_billion ASC NULLS LAST, p.id ASC
                 LIMIT %s OFFSET %s
-            """, (needle, needle, limit, offset))
+            """, params + [limit, offset])
             return cur.fetchall()
 
+
 def _region_count(region):
-    needle = f"%{region.strip()}%"
+    clauses, params = composite_text_predicates(region)
+    predicate = " AND ".join(clauses) or "FALSE"
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -907,12 +908,10 @@ def _region_count(region):
                 WHERE p.status = 'ACTIVE'
                   AND p.published_message_id IS NOT NULL
                   AND p.deleted_from_channel_at IS NULL
-                  AND (
-                    COALESCE(p.district, '') ILIKE %s
-                    OR COALESCE(p.neighborhood, '') ILIKE %s
-                  )
-            """, (needle, needle))
+                  AND (""" + predicate + """)
+            """, params)
             return int(cur.fetchone()[0] or 0)
+
 
 def _destination_channel():
     with db_connect() as conn:
