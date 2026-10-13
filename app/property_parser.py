@@ -657,16 +657,47 @@ def _extract_contextual_known_district(text: str):
     return None
 
 
+def _extract_headline_location(text: str):
+    """Return the complete location written in the property headline."""
+    match = re.search(
+        r"(?:^|\n)\s*"
+        r"(?:پیش[‌ _-]*فروش|فروش)\s+"
+        r"(?:آپارتمان|واحد|ملک)\s*"
+        r"(?:\||[-–—:：])\s*"
+        r"([^\n\r|،,؛;]{2,80})",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return None
+
+    value = _canonicalize_location_text(
+        match.group(1).strip()
+    )
+    value = re.split(
+        r"\s+(?:"
+        r"\d+(?:\.\d+)?\s*متر(?:ی)?"
+        r"|متراژ|طبقه|قیمت|\d+\s*خواب"
+        r"|کد\s*(?:واحد|فایل|ملک|آگهی)"
+        r")",
+        value,
+        maxsplit=1,
+    )[0].strip()
+
+    return value[:255] if value else None
+
+
 def parse_address_text(text: str):
     """
-    Prefer an explicit location line.
-    Otherwise detect a short free-form location line.
+    Prefer the most precise compatible source location.
+
+    A short pin or explicit location such as «ولیعصر» must not hide a
+    more complete property headline such as «ولیعصر لیدای جدید».
     """
 
     pinned_location = _extract_pinned_location(text)
-
-    if pinned_location:
-        return pinned_location
+    explicit_location = None
 
     location_match = re.search(
         r"(?:^|\n)\s*(?:📍\s*)?(?:لوکیشن|منطقه|آدرس)\s*[:：\-]?\s*([^\n\r]+)",
@@ -684,53 +715,39 @@ def parse_address_text(text: str):
             location_match.group(1).strip()
         )
 
-        if _looks_like_office_location(value):
-            value = ""
-
-        if value:
+        if not _looks_like_office_location(value):
             parts = [
                 part.strip()
                 for part in value.split("|")
             ]
-
-            value = " | ".join(
+            explicit_location = " | ".join(
                 part
                 for part in parts
                 if part
-            )
+            ) or None
 
-            return value
+    headline_location = _extract_headline_location(text)
 
-    # Preserve the full named location after a property headline separator.
-    # Example:
-    #   پیش فروش آپارتمان | ولیعصر لیدای جدید
-    # The district remains «ولیعصر», while address_text must keep the
-    # more precise «ولیعصر لیدای جدید».
-    headline_location_match = re.search(
-        r"(?:^|\n)\s*"
-        r"(?:پیش[‌ _-]*فروش|فروش)\s+"
-        r"(?:آپارتمان|واحد|ملک)\s*"
-        r"(?:\||[-–—:：])\s*"
-        r"([^\n\r|،,؛;]{2,80})",
-        text,
-        flags=re.IGNORECASE,
-    )
+    # Prefer the headline only when it is a strict extension of a shorter
+    # explicit/pinned location. This preserves source fidelity without
+    # allowing an unrelated headline to override an exact address.
+    base_location = pinned_location or explicit_location
+    if (
+        headline_location
+        and base_location
+        and len(headline_location) > len(base_location)
+        and base_location in headline_location
+    ):
+        return headline_location
 
-    if headline_location_match:
-        value = _canonicalize_location_text(
-            headline_location_match.group(1).strip()
-        )
-        value = re.split(
-            r"\s+(?:"
-            r"\d+(?:\.\d+)?\s*متر(?:ی)?"
-            r"|متراژ|طبقه|قیمت|\d+\s*خواب"
-            r"|کد\s*(?:واحد|فایل|ملک|آگهی)"
-            r")",
-            value,
-            maxsplit=1,
-        )[0].strip()
-        if value:
-            return value[:255]
+    if pinned_location:
+        return pinned_location
+
+    if explicit_location:
+        return explicit_location
+
+    if headline_location:
+        return headline_location
 
     contextual_district = (
         _extract_contextual_known_district(text)
