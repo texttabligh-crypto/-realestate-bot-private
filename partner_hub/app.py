@@ -106,11 +106,29 @@ async def configure_blue_menu(application: Application):
 
 def home_keyboard(member=None, owner=False):
     rows=[]
-    if owner: rows += [[B("🏢 درخواست‌های عضویت",callback_data="o_pending"),B("🧾 صف بررسی فایل",callback_data="o_submissions")],[B("📊 آمار شبکه",callback_data="o_stats")]]
+    if owner:
+        rows += [
+            [B("🏢 درخواست‌های عضویت",callback_data="o_pending"),B("🧾 صف بررسی فایل",callback_data="o_submissions")],
+            [B("📊 آمار شبکه",callback_data="o_stats")],
+        ]
     if member and member["agency_status"] == "ACTIVE":
-        rows += [[B("➕ ثبت فایل جدید",callback_data="p_add"),B("🏠 فایل‌های من",callback_data="p_files")],
-                 [B("🎨 برند و وایت‌لیبل",callback_data="p_brand"),B("🔌 اتصال ربات و کانال",callback_data="p_connect")],
-                 [B("👥 تیم و دعوت",callback_data="p_team"),B("📊 آمار بنگاه",callback_data="p_stats")]]
+        first=[]
+        if member.get("can_add_file"):
+            first.append(B("➕ ثبت فایل جدید",callback_data="p_add"))
+        first.append(B("🏠 فایل‌های من",callback_data="p_files"))
+        rows.append(first)
+        if member["role"]=="AGENCY_OWNER" or member.get("can_manage_brand"):
+            rows.append([
+                B("🎨 برند و وایت‌لیبل",callback_data="p_brand"),
+                B("🔌 اتصال ربات و کانال",callback_data="p_connect"),
+            ])
+        team_stats=[]
+        if member["role"]=="AGENCY_OWNER" or member.get("can_manage_team"):
+            team_stats.append(B("👥 تیم و دعوت",callback_data="p_team"))
+        if member["role"]=="AGENCY_OWNER" or member.get("can_view_stats"):
+            team_stats.append(B("📊 آمار بنگاه",callback_data="p_stats"))
+        if team_stats:
+            rows.append(team_stats)
     elif not member and not owner:
         rows += [[B("🏢 ثبت‌نام بنگاه",callback_data="reg_start")],[B("🔑 ورود با کد دعوت",callback_data="join_start")]]
     return M(rows)
@@ -148,13 +166,22 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("عضویت شما هنوز فعال نیست.",reply_markup=home_keyboard(mem,uid==OWNER_ID)); return
     if a.startswith("avail_"):
         await availability_callback(q,context,a,mem); return
-    if a=="p_add": await begin_property(q,context); return
+    if a=="p_add":
+        if not mem.get("can_add_file"):
+            await q.answer("دسترسی ثبت فایل ندارید.",show_alert=True); return
+        await begin_property(q,context); return
     if a.startswith("pf_") or a.startswith("ptype_") or a.startswith("deal_"):
         await property_callback(q,context,a,mem); return
     if a=="p_files": await list_files(q,mem); return
-    if a=="p_brand": await brand_menu(q,mem); return
+    if a=="p_brand":
+        if not (mem["role"]=="AGENCY_OWNER" or mem.get("can_manage_brand")):
+            await q.answer("دسترسی مدیریت برند ندارید.",show_alert=True); return
+        await brand_menu(q,mem); return
     if a.startswith("brand_"): await brand_callback(q,context,a,mem); return
-    if a=="p_connect": await connection_menu(q,mem); return
+    if a=="p_connect":
+        if not (mem["role"]=="AGENCY_OWNER" or mem.get("can_manage_brand")):
+            await q.answer("دسترسی مدیریت اتصال‌ها ندارید.",show_alert=True); return
+        await connection_menu(q,mem); return
     if a.startswith("conn_"): await connection_callback(q,context,a,mem); return
     if a=="p_team" or a.startswith("team_"):
         await team_callback(q,context,a,mem); return
@@ -364,13 +391,23 @@ async def property_callback(q,context,a,mem):
     if a in ("pf_photos_done","pf_no_photos"):
         if a=="pf_no_photos": st['data']['photos']=[]
         await preview(q,context); return
-    if a=="pf_submit": await save_submission(q,context,mem); return
-    if a=="pf_own_now": await publish_own(q,context,mem); return
+    if a=="pf_submit":
+        if not mem.get("can_add_file"):
+            await q.answer("دسترسی ثبت فایل ندارید.",show_alert=True); return
+        await save_submission(q,context,mem); return
+    if a=="pf_own_now":
+        if not mem.get("can_publish_own"):
+            await q.answer("دسترسی انتشار ندارید.",show_alert=True); return
+        await publish_own(q,context,mem); return
     if a=="pf_own_schedule":
+        if not mem.get("can_publish_own"):
+            await q.answer("دسترسی زمان‌بندی ندارید.",show_alert=True); return
         context.user_data['flow']='schedule'
         await q.edit_message_text("زمان انتشار را بفرستید.\nمثال: فردا ۱۰:۳۰\nیا: ۱۴۰۵/۰۷/۱۸ ۱۸:۰۰")
         return
     if a=="pf_central":
+        if not mem.get("can_request_central"):
+            await q.answer("دسترسی ارسال به کانال مرکزی ندارید.",show_alert=True); return
         sid=st.get('saved_submission_id'); db.execute("UPDATE partner_submissions SET status='SUBMITTED',updated_at=NOW() WHERE id=%s AND agency_id=%s",(sid,mem['agency_id']))
         db.execute("INSERT INTO partner_publication_jobs(submission_id,target_type,status) VALUES(%s,'CENTRAL_CHANNEL','PENDING')",(sid,)); db.audit("CENTRAL_REVIEW_REQUESTED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid)
         await q.edit_message_text("✅ فایل برای بررسی و انتشار در کانال مرکزی ارسال شد.",reply_markup=M([[B("⬅️ منو",callback_data="home")]])); return
@@ -456,7 +493,19 @@ async def publish_own(q,context,mem):
             sent=await bot.send_media_group(conn['telegram_channel_id'],group); mid=sent[0].message_id
         else: mid=(await bot.send_message(conn['telegram_channel_id'],cap,parse_mode=ParseMode.HTML)).message_id
         db.execute("INSERT INTO partner_publication_jobs(submission_id,target_type,channel_connection_id,status,published_at,telegram_message_id) VALUES(%s,'AGENCY_CHANNEL',%s,'PUBLISHED',NOW(),%s)",(sid,conn['id'],mid))
-        db.execute("UPDATE partner_submissions SET status='ACTIVE',updated_at=NOW() WHERE id=%s",(sid,))
+        db.execute(
+            """UPDATE partner_submissions
+               SET status='ACTIVE',
+                   last_availability_confirmed_at=NOW(),
+                   availability_check_due_at=NOW()+interval '3 days',
+                   availability_check_sent_at=NULL,
+                   availability_reminder_sent_at=NULL,
+                   availability_missed_cycles=0,
+                   availability_paused_at=NULL,
+                   updated_at=NOW()
+               WHERE id=%s""",
+            (sid,),
+        )
         db.audit("AGENCY_CHANNEL_PUBLISHED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid,{"message_id":mid})
         await q.edit_message_text("✅ با برند بنگاه در کانال خودتان منتشر شد.",reply_markup=M([[B("🌐 ارسال برای کانال مرکزی",callback_data="pf_central")],[B("⬅️ منو",callback_data="home")]]))
     except Exception as exc:
@@ -465,7 +514,12 @@ async def publish_own(q,context,mem):
 
 
 async def schedule_text(update,context):
-    mem=db.member(update.effective_user.id); raw=digits(update.message.text.strip()); now=datetime.now(TEHRAN)
+    mem=db.member(update.effective_user.id)
+    if not mem or not mem.get("can_publish_own"):
+        context.user_data.clear()
+        await update.message.reply_text("دسترسی زمان‌بندی انتشار ندارید.")
+        return
+    raw=digits(update.message.text.strip()); now=datetime.now(TEHRAN)
     try:
         m=re.search(r"(\d{1,2})[:٫.](\d{2})",raw)
         if not m: raise ValueError("time")
@@ -960,7 +1014,7 @@ async def agency_delivery_bot(hub_app,agency_id):
 
 
 async def send_availability_prompt(hub_app,submission,reminder=False):
-    bot=await agency_delivery_bot(hub_app,submission["agency_id"])
+    primary=await agency_delivery_bot(hub_app,submission["agency_id"])
     prefix="🔔 یادآوری تأیید فایل" if reminder else "🏠 تأیید موجودی فایل"
     text=(
         f"{prefix}\n\n"
@@ -968,11 +1022,21 @@ async def send_availability_prompt(hub_app,submission,reminder=False):
         f"{submission['district']} | {submission['area_m2']} متر\n\n"
         "این فایل هنوز موجود است؟"
     )
-    await bot.send_message(
-        submission["telegram_user_id"],
-        text,
+    kwargs=dict(
+        chat_id=submission["telegram_user_id"],
+        text=text,
         reply_markup=availability_keyboard(submission["id"]),
     )
+    try:
+        await primary.send_message(**kwargs)
+    except TelegramError:
+        if primary is hub_app.bot:
+            raise
+        log.info(
+            "tenant availability delivery unavailable; using hub bot submission=%s",
+            submission["id"],
+        )
+        await hub_app.bot.send_message(**kwargs)
 
 
 async def refresh_agency_channel_post(submission_id,note=None):
@@ -1153,7 +1217,8 @@ async def availability_price_text(update,context):
             assignments.append("current_price_billion=%s")
             params.append(new_price/1_000_000_000)
         if assignments:
-            assignments.append("updated_at=NOW()")
+            if "updated_at" in pcols:
+                assignments.append("updated_at=NOW()")
             params.append(submission["central_property_id"])
             db.execute(
                 f"UPDATE properties SET {','.join(assignments)} WHERE id=%s",
@@ -1277,14 +1342,22 @@ async def run_availability_cycle(hub_app):
                 row["id"],
                 exc,
             )
-        db.execute(
-            """UPDATE partner_submissions
-               SET availability_reminder_sent_at=NOW(),
-                   availability_last_error=%s,
-                   updated_at=NOW()
-               WHERE id=%s""",
-            (error,row["id"]),
-        )
+        if error:
+            db.execute(
+                """UPDATE partner_submissions
+                   SET availability_last_error=%s,updated_at=NOW()
+                   WHERE id=%s""",
+                (error,row["id"]),
+            )
+        else:
+            db.execute(
+                """UPDATE partner_submissions
+                   SET availability_reminder_sent_at=NOW(),
+                       availability_last_error=NULL,
+                       updated_at=NOW()
+                   WHERE id=%s""",
+                (row["id"],),
+            )
 
     due=db.all_rows(
         """SELECT s.*,m.telegram_user_id
@@ -1307,15 +1380,25 @@ async def run_availability_cycle(hub_app):
                 row["id"],
                 exc,
             )
-        db.execute(
-            """UPDATE partner_submissions
-               SET availability_check_sent_at=NOW(),
-                   availability_reminder_sent_at=NULL,
-                   availability_last_error=%s,
-                   updated_at=NOW()
-               WHERE id=%s""",
-            (error,row["id"]),
-        )
+        if error:
+            db.execute(
+                """UPDATE partner_submissions
+                   SET availability_check_due_at=NOW()+interval '1 hour',
+                       availability_last_error=%s,
+                       updated_at=NOW()
+                   WHERE id=%s""",
+                (error,row["id"]),
+            )
+        else:
+            db.execute(
+                """UPDATE partner_submissions
+                   SET availability_check_sent_at=NOW(),
+                       availability_reminder_sent_at=NULL,
+                       availability_last_error=NULL,
+                       updated_at=NOW()
+                   WHERE id=%s""",
+                (row["id"],),
+            )
 
 
 async def availability_worker(hub_app):
@@ -1372,7 +1455,21 @@ async def schedule_worker(app:Application):
                 locked=db.one("UPDATE partner_publication_jobs SET status='PROCESSING',attempts=attempts+1,updated_at=NOW() WHERE id=%s AND status='SCHEDULED' RETURNING id",(job['id'],))
                 if not locked: continue
                 try:
-                    mid=await publish_scheduled_job(job); db.execute("UPDATE partner_publication_jobs SET status='PUBLISHED',published_at=NOW(),telegram_message_id=%s,updated_at=NOW() WHERE id=%s",(mid,job['id'])); db.execute("UPDATE partner_submissions SET status='ACTIVE',updated_at=NOW() WHERE id=%s",(job['submission_id'],))
+                    mid=await publish_scheduled_job(job)
+                    db.execute("UPDATE partner_publication_jobs SET status='PUBLISHED',published_at=NOW(),telegram_message_id=%s,updated_at=NOW() WHERE id=%s",(mid,job['id']))
+                    db.execute(
+                        """UPDATE partner_submissions
+                           SET status='ACTIVE',
+                               last_availability_confirmed_at=NOW(),
+                               availability_check_due_at=NOW()+interval '3 days',
+                               availability_check_sent_at=NULL,
+                               availability_reminder_sent_at=NULL,
+                               availability_missed_cycles=0,
+                               availability_paused_at=NULL,
+                               updated_at=NOW()
+                           WHERE id=%s""",
+                        (job['submission_id'],),
+                    )
                 except Exception as exc:
                     db.execute("UPDATE partner_publication_jobs SET status=CASE WHEN attempts>=5 THEN 'FAILED' ELSE 'SCHEDULED' END,last_error=%s,scheduled_for=NOW()+interval '5 minutes',updated_at=NOW() WHERE id=%s",(str(exc)[:2000],job['id']))
         except Exception: log.exception("schedule worker cycle")
