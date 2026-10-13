@@ -9023,6 +9023,24 @@ async def repair_extended_source_locations(application):
     )
 
 
+async def delayed_extended_source_location_repair(
+    application,
+):
+    # The backfill scans historical source text and may update several
+    # Telegram posts.  Keep it completely outside the startup window so
+    # production health checks can observe a ready bot first.
+    await asyncio.sleep(15)
+
+    try:
+        await repair_extended_source_locations(application)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.exception(
+            "Extended source location repair worker failed"
+        )
+
+
 def start_extended_source_location_repair(application):
     existing = application.bot_data.get(
         "extended_source_location_repair_task"
@@ -9032,7 +9050,9 @@ def start_extended_source_location_repair(application):
         return existing
 
     task = asyncio.create_task(
-        repair_extended_source_locations(application),
+        delayed_extended_source_location_repair(
+            application
+        ),
         name="extended_source_location_repair",
     )
     application.bot_data[
