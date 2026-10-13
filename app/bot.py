@@ -86,6 +86,8 @@ from shahfile_smart import (
     handle_manager_text as handle_smart_manager_text,
 )
 from shahfile_ai import start_search_watch_worker
+from customer_transcript import TranscriptBot, record_update, ensure_schema as ensure_transcript_schema
+from telegram.ext import TypeHandler
 from crm_campaign_hub import (
     ensure_schema as ensure_campaign_crm_schema,
     start_worker as start_campaign_broadcast_worker,
@@ -9159,11 +9161,15 @@ async def post_init(application):
     ensure_smart_schema()
     ensure_showcase_schema()
     ensure_campaign_crm_schema()
+    ensure_transcript_schema()
     start_campaign_watch_worker(application)
     start_campaign_broadcast_worker(application)
     start_visit_reminder_worker(application)
     start_visit_notification_worker(application)
-    start_search_watch_worker(application)
+    async def delayed_search_watch():
+        await asyncio.sleep(12)
+        start_search_watch_worker(application)
+    application.bot_data['search_watch_start'] = asyncio.create_task(delayed_search_watch())
     start_footer_bulk_refresh_worker(application)
     start_scheduler(application)
     start_deleted_posts_watcher(application)
@@ -16105,11 +16111,12 @@ def main():
 
     app = (
         Application.builder()
-        .token(BOT_TOKEN)
+        .bot(TranscriptBot(token=BOT_TOKEN))
         .post_init(post_init)
         .build()
     )
 
+    app.add_handler(TypeHandler(Update, record_update), group=100)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("login", login_command))
     app.add_handler(CommandHandler("logout", logout))
