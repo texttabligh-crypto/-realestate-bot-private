@@ -210,15 +210,90 @@ async def registration_text(update,context):
 
 
 async def join_text(update,context):
-    code=update.message.text.strip().upper(); row=db.one("""SELECT i.*,a.status agency_status FROM partner_invites i JOIN partner_agencies a ON a.id=i.agency_id
-        WHERE i.code=%s AND i.used_count<i.max_uses AND (i.expires_at IS NULL OR i.expires_at>NOW())""",(code,))
-    if not row or row['agency_status']!='ACTIVE': await update.message.reply_text("کد دعوت معتبر یا فعال نیست."); return
+    code=update.message.text.strip().upper()
     u=update.effective_user
+    current=db.member(u.id)
+    if current:
+        context.user_data.clear()
+        if current["agency_id"]:
+            await update.message.reply_text(
+                "شما از قبل عضو یک بنگاه فعال هستید.",
+                reply_markup=home_keyboard(current),
+            )
+        return
+
     with db.connect() as c,c.cursor() as cur:
-        cur.execute("INSERT INTO partner_members(agency_id,telegram_user_id,username,display_name,role) VALUES(%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",(row['agency_id'],u.id,u.username,u.full_name,row['role']))
-        cur.execute("UPDATE partner_invites SET used_count=used_count+1 WHERE id=%s",(row['id'],)); c.commit()
-    context.user_data.clear(); db.audit("MEMBER_JOINED",u.id,row['agency_id'],"MEMBER",None)
-    await update.message.reply_text("✅ به تیم بنگاه اضافه شدید.",reply_markup=home_keyboard(db.member(u.id)))
+        cur.execute(
+            """SELECT i.*,a.status agency_status
+               FROM partner_invites i
+               JOIN partner_agencies a ON a.id=i.agency_id
+               WHERE i.code=%s
+                 AND i.is_revoked=FALSE
+                 AND i.used_count<i.max_uses
+                 AND (i.expires_at IS NULL OR i.expires_at>NOW())
+               FOR UPDATE OF i""",
+            (code,),
+        )
+        row=cur.fetchone()
+        if not row or row["agency_status"]!="ACTIVE":
+            await update.message.reply_text(
+                "کد دعوت معتبر، فعال یا دارای ظرفیت نیست."
+            )
+            return
+
+        defaults={
+            "AGENCY_ADMIN": (True,True,True,True,True,True),
+            "ADVISOR": (True,False,True,False,False,False),
+            "SECRETARY": (True,False,False,False,False,False),
+        }.get(row["role"],(True,False,True,False,False,False))
+
+        cur.execute(
+            """INSERT INTO partner_members(
+                   agency_id,telegram_user_id,username,display_name,role,
+                   can_add_file,can_publish_own,can_request_central,
+                   can_manage_brand,can_manage_team,can_view_stats,is_active
+               )
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+               ON CONFLICT(agency_id,telegram_user_id)
+               DO UPDATE SET
+                   username=EXCLUDED.username,
+                   display_name=EXCLUDED.display_name,
+                   role=EXCLUDED.role,
+                   can_add_file=EXCLUDED.can_add_file,
+                   can_publish_own=EXCLUDED.can_publish_own,
+                   can_request_central=EXCLUDED.can_request_central,
+                   can_manage_brand=EXCLUDED.can_manage_brand,
+                   can_manage_team=EXCLUDED.can_manage_team,
+                   can_view_stats=EXCLUDED.can_view_stats,
+                   is_active=TRUE,
+                   updated_at=NOW()
+               RETURNING id""",
+            (
+                row["agency_id"],u.id,u.username,u.full_name,row["role"],
+                *defaults,
+            ),
+        )
+        member_id=cur.fetchone()["id"]
+        cur.execute(
+            "UPDATE partner_invites SET used_count=used_count+1 WHERE id=%s",
+            (row["id"],),
+        )
+        c.commit()
+
+    context.user_data.clear()
+    db.audit(
+        "MEMBER_JOINED",
+        u.id,
+        row["agency_id"],
+        "MEMBER",
+        member_id,
+        {"role":row["role"],"invite_id":row["id"]},
+    )
+    await update.message.reply_text(
+        f"✅ به‌عنوان «{ROLE_LABELS.get(row['role'],row['role'])}» "
+        "به تیم بنگاه اضافه شدید.",
+        reply_markup=home_keyboard(db.member(u.id)),
+    )
 
 
 async def owner_callback(q,context,a):
