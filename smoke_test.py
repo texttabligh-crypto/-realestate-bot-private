@@ -488,3 +488,56 @@ for location in ("ولیعصر مولوی", "ولیعصر لیدای جدید"):
         )
         if parse_property(sample)["address_text"] != location:
             raise SystemExit("emoji wrapped headline location regression")
+
+# Executable SQL predicate regression: terms may live in different fields.
+import sqlite3
+from app.composite_search import composite_text_predicates
+
+test_db = sqlite3.connect(":memory:")
+test_db.executescript("""
+CREATE TABLE properties (
+ id INTEGER, unit_code TEXT, district TEXT, neighborhood TEXT,
+ address_text TEXT, raw_text TEXT, floor_text TEXT,
+ area_m2 REAL, current_price_billion REAL
+);
+CREATE TABLE property_attributes (
+ property_id INTEGER, attribute_label TEXT, attribute_value TEXT
+);
+CREATE TABLE property_sources (
+ property_id INTEGER, is_active BOOLEAN,
+ source_raw_text TEXT, source_unit_code TEXT
+);
+INSERT INTO properties VALUES
+ (1, '1', 'ولیعصر', '', 'ولیعصر مولوی', 'پیش فروش آپارتمان', '5', 120, 7),
+ (2, '2', 'باغمیشه', '', 'باغمیشه', 'پیش‌فروش آپارتمان تماس دفتر ولیعصر', '3', 100, 7),
+ (3, '3', 'ولیعصر', '', 'ولیعصر', 'فروش آماده', '2', 90, 7);
+""")
+for phrase in (
+    "پیشفروش ولیعصر", "پیش‌فروش ولیعصر",
+    "پیش فروش ولیعصر", "ولیعصر پیش_فروش",
+):
+    clauses, values = composite_text_predicates(phrase)
+    sql = "SELECT p.id FROM properties p WHERE " + " AND ".join(clauses)
+    # SQLite executes the same replace/EXISTS/AND logic; ILIKE is PostgreSQL.
+    actual = test_db.execute(sql.replace("ILIKE", "LIKE").replace("%s", "?").replace("::text", ""), values).fetchall()
+    if actual != [(1,)]:
+        raise SystemExit("composed search SQL regression: " + phrase)
+test_db.close()
+
+# Test structured numeric filters with the same composed free-text path.
+search_ast = ast.parse(bot)
+search_functions = [
+    node for node in search_ast.body
+    if isinstance(node, ast.FunctionDef)
+    and node.name in ("normalize_search_text", "parse_smart_search_query")
+]
+import re
+search_namespace = {"re": re}
+exec(compile(ast.Module(body=search_functions, type_ignores=[]), "<search>", "exec"),
+     search_namespace)
+parsed_search = search_namespace["parse_smart_search_query"](
+    "پیشفروش ولیعصر ۵ تا ۸ میلیارد"
+)
+assert parsed_search["price_min"] == 5
+assert parsed_search["price_max"] == 8
+assert len(composite_text_predicates(parsed_search["free_text"])[0]) == 2
