@@ -519,7 +519,7 @@ for phrase in (
     clauses, values = composite_text_predicates(phrase)
     sql = "SELECT p.id FROM properties p WHERE " + " AND ".join(clauses)
     # SQLite executes the same replace/EXISTS/AND logic; ILIKE is PostgreSQL.
-    actual = test_db.execute(sql.replace("ILIKE", "LIKE"), values).fetchall()
+    actual = test_db.execute(sql.replace("ILIKE", "LIKE").replace("%s", "?").replace("::text", ""), values).fetchall()
     if actual != [(1,)]:
         raise SystemExit("composed search SQL regression: " + phrase)
 test_db.close()
