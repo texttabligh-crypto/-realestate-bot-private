@@ -276,6 +276,7 @@ def get_last_scheduler_attempt(window):
                 WHERE attempted_at >= %s
                   AND attempted_at < %s
                   AND window_id = %s
+                  AND attempt_status <> 'SKIPPED_STALE'
                 """,
                 (
                     window["start"],
@@ -368,6 +369,11 @@ def get_queue_candidates(limit=50):
                     'PENDING_DUPLICATE'
                 )
                   AND p.status = 'ACTIVE'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM duplicate_reviews dr
+                      WHERE dr.property_id = q.property_id
+                        AND dr.review_status = 'PENDING'
+                  )
                   AND (
                       q.scheduled_for IS NULL
                       OR q.scheduled_for <= NOW()
@@ -906,6 +912,23 @@ def log_scheduler_health_snapshot():
             )
             queue_counts = dict(cur.fetchall())
 
+            # Inspect the former first-50 selection to expose starvation.
+            cur.execute("""
+                SELECT head.queue_status, COALESCE(dr.review_status, 'NONE'), COUNT(*)
+                FROM (
+                    SELECT q.property_id, q.queue_status
+                    FROM publish_queue q JOIN properties p ON p.id=q.property_id
+                    WHERE q.queue_status IN ('READY','SCHEDULED','PENDING_DUPLICATE')
+                      AND p.status='ACTIVE'
+                      AND (q.scheduled_for IS NULL OR q.scheduled_for<=NOW())
+                    ORDER BY COALESCE(q.priority,0) DESC,q.created_at,q.id
+                    LIMIT 50
+                ) head
+                LEFT JOIN duplicate_reviews dr ON dr.property_id=head.property_id
+                GROUP BY head.queue_status,dr.review_status
+            """)
+            old_queue_head = cur.fetchall()
+
             cur.execute(
                 """
                 SELECT attempt_status, COUNT(*)
@@ -989,7 +1012,7 @@ def log_scheduler_health_snapshot():
         "SCHEDULER_HEALTH tehran_now=%s windows=%s "
         "queue_counts=%s eligible=%s attempts_36h=%s "
         "published_36h=%s recent_attempts=%s "
-        "recent_failures=%s runtime=%s",
+        "recent_failures=%s runtime=%s old_first50=%s",
         datetime.now(TEHRAN).isoformat(timespec="seconds"),
         windows,
         queue_counts,
@@ -999,6 +1022,7 @@ def log_scheduler_health_snapshot():
         recent_attempts,
         recent_failures,
         runtime_workers,
+        old_queue_head,
     )
 
 
@@ -1222,4 +1246,5 @@ def start_scheduler(application):
         ] = watchdog
 
     return primary
+
 
