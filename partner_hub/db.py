@@ -69,6 +69,79 @@ def table_columns(table):
     return {r['column_name'] for r in rows}
 
 
+def ensure_partner_v2_schema():
+    """Idempotent team-management and three-day availability upgrade."""
+    statements = (
+        """
+        ALTER TABLE partner_members
+          ADD COLUMN IF NOT EXISTS can_manage_team BOOLEAN NOT NULL DEFAULT FALSE,
+          ADD COLUMN IF NOT EXISTS can_view_stats BOOLEAN NOT NULL DEFAULT FALSE
+        """,
+        """
+        ALTER TABLE partner_invites
+          ADD COLUMN IF NOT EXISTS is_revoked BOOLEAN NOT NULL DEFAULT FALSE
+        """,
+        """
+        ALTER TABLE partner_submissions
+          ADD COLUMN IF NOT EXISTS last_availability_confirmed_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS availability_check_due_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS availability_check_sent_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS availability_reminder_sent_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS availability_missed_cycles INTEGER NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS availability_paused_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS status_before_availability_pause VARCHAR(30),
+          ADD COLUMN IF NOT EXISTS availability_last_error TEXT
+        """,
+        """
+        UPDATE partner_members
+        SET can_manage_team = TRUE,
+            can_view_stats = TRUE
+        WHERE role IN ('AGENCY_OWNER', 'AGENCY_ADMIN')
+        """,
+        """
+        UPDATE partner_submissions
+        SET last_availability_confirmed_at = COALESCE(
+                last_availability_confirmed_at,
+                NOW()
+            ),
+            availability_check_due_at = COALESCE(
+                availability_check_due_at,
+                NOW() + INTERVAL '3 days'
+            )
+        WHERE status = 'ACTIVE'
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_partner_availability_due
+        ON partner_submissions(status, availability_check_due_at)
+        """,
+    )
+
+    with connect() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            ALTER TABLE partner_members
+            DROP CONSTRAINT IF EXISTS partner_members_role_check
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE partner_members
+            ADD CONSTRAINT partner_members_role_check
+            CHECK (
+                role IN (
+                    'AGENCY_OWNER',
+                    'AGENCY_ADMIN',
+                    'ADVISOR',
+                    'SECRETARY'
+                )
+            )
+            """
+        )
+        for statement in statements:
+            cur.execute(statement)
+        c.commit()
+
+
 def push_to_central(submission_id, actor_telegram_id):
     """Create one central property safely across old/new schemas and enqueue it.
     Private owner fields are deliberately never copied into public property text.
@@ -106,7 +179,22 @@ def push_to_central(submission_id, actor_telegram_id):
         qvalues = {"property_id":pid,"queue_status":"READY","priority":100,"queue_source":"PARTNER","queued_by_user_id":None}
         qc = [k for k,v in qvalues.items() if k in qcols and v is not None]
         cur.execute(f"INSERT INTO publish_queue({','.join(qc)}) VALUES({','.join(['%s']*len(qc))})", [qvalues[k] for k in qc])
-        cur.execute("UPDATE partner_submissions SET central_property_id=%s,status='ACTIVE',approved_at=NOW(),approved_by_telegram_id=%s,updated_at=NOW() WHERE id=%s", (pid,actor_telegram_id,submission_id))
+        cur.execute(
+            """UPDATE partner_submissions
+               SET central_property_id=%s,
+                   status='ACTIVE',
+                   approved_at=NOW(),
+                   approved_by_telegram_id=%s,
+                   last_availability_confirmed_at=NOW(),
+                   availability_check_due_at=NOW()+interval '3 days',
+                   availability_check_sent_at=NULL,
+                   availability_reminder_sent_at=NULL,
+                   availability_missed_cycles=0,
+                   availability_paused_at=NULL,
+                   updated_at=NOW()
+               WHERE id=%s""",
+            (pid,actor_telegram_id,submission_id),
+        )
         c.commit()
     audit("CENTRAL_QUEUE_CREATED",actor_telegram_id,s["agency_id"],"SUBMISSION",submission_id,{"property_id":pid})
     return pid
