@@ -179,7 +179,22 @@ def push_to_central(submission_id, actor_telegram_id):
         qvalues = {"property_id":pid,"queue_status":"READY","priority":100,"queue_source":"PARTNER","queued_by_user_id":None}
         qc = [k for k,v in qvalues.items() if k in qcols and v is not None]
         cur.execute(f"INSERT INTO publish_queue({','.join(qc)}) VALUES({','.join(['%s']*len(qc))})", [qvalues[k] for k in qc])
-        cur.execute("UPDATE partner_submissions SET central_property_id=%s,status='ACTIVE',approved_at=NOW(),approved_by_telegram_id=%s,updated_at=NOW() WHERE id=%s", (pid,actor_telegram_id,submission_id))
+        cur.execute(
+            """UPDATE partner_submissions
+               SET central_property_id=%s,
+                   status='ACTIVE',
+                   approved_at=NOW(),
+                   approved_by_telegram_id=%s,
+                   last_availability_confirmed_at=NOW(),
+                   availability_check_due_at=NOW()+interval '3 days',
+                   availability_check_sent_at=NULL,
+                   availability_reminder_sent_at=NULL,
+                   availability_missed_cycles=0,
+                   availability_paused_at=NULL,
+                   updated_at=NOW()
+               WHERE id=%s""",
+            (pid,actor_telegram_id,submission_id),
+        )
         c.commit()
     audit("CENTRAL_QUEUE_CREATED",actor_telegram_id,s["agency_id"],"SUBMISSION",submission_id,{"property_id":pid})
     return pid
