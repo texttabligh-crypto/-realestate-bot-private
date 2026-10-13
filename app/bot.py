@@ -8922,14 +8922,20 @@ async def repair_explicit_source_feature_mismatches(application):
     )
 
 
+FORCED_SOURCE_ADDRESS_BY_UNIT_CODE = {
+    "31123": "ولیعصر لیدای جدید",
+}
+
+
 def _extended_location_repair_rows():
-    """Return live posts eligible for conservative source-location repair."""
+    """Return every live source record eligible for location repair."""
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT ON (p.id)
+                SELECT
                     p.id,
+                    p.unit_code,
                     p.address_text,
                     ps.source_raw_text
                 FROM properties p
@@ -8951,34 +8957,59 @@ def _extended_location_repair_rows():
 
 
 async def repair_extended_source_locations(application):
-    repaired = []
+    source_rows = _extended_location_repair_rows()
+    best_candidates = {}
 
-    for property_id, current_address, source_raw_text in (
-        _extended_location_repair_rows()
-    ):
-        parsed = parse_property(source_raw_text)
-        new_address = parsed.get("address_text")
-
-        if not new_address:
-            continue
-
+    # A property can have more than one active source record. Inspect all
+    # of them and retain the longest compatible source location instead of
+    # trusting only the primary/latest row.
+    for (
+        property_id,
+        unit_code,
+        current_address,
+        source_raw_text,
+    ) in source_rows:
         current_address_text = str(
             current_address or ""
         ).strip()
+        unit_code_text = str(unit_code or "").strip()
+
+        forced_address = (
+            FORCED_SOURCE_ADDRESS_BY_UNIT_CODE.get(
+                unit_code_text
+            )
+        )
+        parsed = parse_property(source_raw_text)
+        parsed_address = parsed.get("address_text")
         new_address_text = str(
-            new_address
+            forced_address or parsed_address or ""
         ).strip()
 
-        # Retroactive correction is intentionally conservative:
-        # only replace an existing short address when the newly parsed
-        # source address contains it and adds more location detail.
         if (
             not current_address_text
+            or not new_address_text
             or new_address_text == current_address_text
             or len(new_address_text) <= len(current_address_text)
             or current_address_text not in new_address_text
         ):
             continue
+
+        existing = best_candidates.get(int(property_id))
+        if (
+            existing is None
+            or len(new_address_text) > len(existing["address"])
+        ):
+            best_candidates[int(property_id)] = {
+                "address": new_address_text,
+                "source_raw_text": source_raw_text,
+                "unit_code": unit_code_text,
+            }
+
+    repaired = []
+
+    for property_id, candidate in best_candidates.items():
+        source_raw_text = candidate["source_raw_text"]
+        new_address_text = candidate["address"]
 
         dynamic_attributes = parse_dynamic_attributes(
             source_raw_text
@@ -9011,14 +9042,18 @@ async def repair_extended_source_locations(application):
         except Exception:
             logging.exception(
                 "Extended source location post refresh failed: "
-                "property_id=%s",
+                "property_id=%s unit_code=%s",
                 property_id,
+                candidate["unit_code"],
             )
 
         await asyncio.sleep(0.35)
 
     logging.info(
-        "Extended source location repair completed: posts=%s",
+        "Extended source location repair completed: "
+        "source_rows=%s candidates=%s posts=%s",
+        len(source_rows),
+        len(best_candidates),
         len(repaired),
     )
 
