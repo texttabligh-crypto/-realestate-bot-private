@@ -496,17 +496,348 @@ async def connect_channel_text(update,context):
     except Exception as exc: await update.message.reply_text("❌ اتصال کانال ناموفق بود. ربات باید ادمین و دارای اجازه ارسال پیام باشد.\n"+str(exc)[:400])
 
 
+def can_manage_team(mem):
+    return bool(
+        mem
+        and (
+            mem["role"] == "AGENCY_OWNER"
+            or mem.get("can_manage_team")
+        )
+    )
+
+
+def can_manage_target(actor, target):
+    if target["role"] == "AGENCY_OWNER":
+        return False
+    if actor["role"] == "AGENCY_OWNER":
+        return True
+    return (
+        can_manage_team(actor)
+        and target["role"] not in (
+            "AGENCY_OWNER",
+            "AGENCY_ADMIN",
+        )
+    )
+
+
 async def team_menu(q,mem):
-    rows=db.all_rows("SELECT display_name,username,role FROM partner_members WHERE agency_id=%s AND is_active ORDER BY id",(mem['agency_id'],))
-    text="👥 تیم بنگاه\n\n"+"\n".join(f"• {r['display_name'] or r['username']} — {r['role']}" for r in rows)
-    await q.edit_message_text(text,reply_markup=M([[B("➕ ساخت کد دعوت",callback_data="team_invite")],[B("⬅️",callback_data="home")]]))
+    members=db.all_rows(
+        """SELECT id,display_name,username,role,is_active
+           FROM partner_members
+           WHERE agency_id=%s
+           ORDER BY is_active DESC,id""",
+        (mem["agency_id"],),
+    )
+    lines=["👥 تیم بنگاه",""]
+    for row in members:
+        name=row["display_name"] or row["username"] or f"عضو {row['id']}"
+        state="✅" if row["is_active"] else "⛔️"
+        lines.append(
+            f"{state} {name} — {ROLE_LABELS.get(row['role'],row['role'])}"
+        )
+    buttons=[]
+    if can_manage_team(mem):
+        buttons.extend([
+            [B("➕ ساخت کد دعوت",callback_data="team_invite")],
+            [B("⚙️ مدیریت اعضا",callback_data="team_members")],
+            [B("🔑 کدهای دعوت",callback_data="team_invites")],
+        ])
+    buttons.append([B("⬅️ منوی اصلی",callback_data="home")])
+    await q.edit_message_text(
+        "\n".join(lines),
+        reply_markup=M(buttons),
+    )
 
 
-async def create_invite(q,mem):
-    if mem['role'] not in ('AGENCY_OWNER','AGENCY_ADMIN'): await q.answer("دسترسی ندارید.",show_alert=True); return
-    code=hashlib.sha256(os.urandom(32)).hexdigest()[:10].upper()
-    db.execute("INSERT INTO partner_invites(agency_id,code,expires_at,created_by_member_id) VALUES(%s,%s,NOW()+interval '7 days',%s)",(mem['agency_id'],code,mem['id']))
-    await q.edit_message_text(f"🔑 کد دعوت یک‌بارمصرف:\n<code>{code}</code>\n\nاعتبار: ۷ روز",parse_mode=ParseMode.HTML,reply_markup=M([[B("⬅️ تیم",callback_data="p_team")]]))
+async def team_callback(q,context,a,mem):
+    if a=="p_team":
+        await team_menu(q,mem); return
+
+    if not can_manage_team(mem):
+        await q.answer("دسترسی مدیریت تیم ندارید.",show_alert=True); return
+
+    if a=="team_invite":
+        roles=[
+            [B("👤 مشاور",callback_data="team_invrole_ADVISOR")],
+            [B("🗂 منشی",callback_data="team_invrole_SECRETARY")],
+        ]
+        if mem["role"]=="AGENCY_OWNER":
+            roles.append([B("👔 مدیر",callback_data="team_invrole_AGENCY_ADMIN")])
+        roles.append([B("⬅️ تیم",callback_data="p_team")])
+        await q.edit_message_text(
+            "نقش عضو جدید را انتخاب کنید:",
+            reply_markup=M(roles),
+        ); return
+
+    if a.startswith("team_invrole_"):
+        role=a.replace("team_invrole_","",1)
+        allowed={"ADVISOR","SECRETARY"}
+        if mem["role"]=="AGENCY_OWNER":
+            allowed.add("AGENCY_ADMIN")
+        if role not in allowed:
+            await q.answer("نقش مجاز نیست.",show_alert=True); return
+        await q.edit_message_text(
+            f"تعداد استفاده از کد دعوت برای «{ROLE_LABELS[role]}»:",
+            reply_markup=M([
+                [
+                    B("یک‌بار",callback_data=f"team_invuses_{role}_1"),
+                    B("۵ نفر",callback_data=f"team_invuses_{role}_5"),
+                    B("۲۰ نفر",callback_data=f"team_invuses_{role}_20"),
+                ],
+                [B("⬅️ انتخاب نقش",callback_data="team_invite")],
+            ]),
+        ); return
+
+    if a.startswith("team_invuses_"):
+        match=re.fullmatch(
+            r"team_invuses_(AGENCY_ADMIN|ADVISOR|SECRETARY)_(1|5|20)",
+            a,
+        )
+        if not match:
+            await q.answer("درخواست نامعتبر است.",show_alert=True); return
+        role,uses=match.group(1),int(match.group(2))
+        if role=="AGENCY_ADMIN" and mem["role"]!="AGENCY_OWNER":
+            await q.answer("فقط مالک بنگاه می‌تواند مدیر دعوت کند.",show_alert=True); return
+        code=hashlib.sha256(os.urandom(32)).hexdigest()[:10].upper()
+        db.execute(
+            """INSERT INTO partner_invites(
+                   agency_id,code,role,max_uses,expires_at,created_by_member_id
+               )
+               VALUES(%s,%s,%s,%s,NOW()+interval '7 days',%s)""",
+            (mem["agency_id"],code,role,uses,mem["id"]),
+        )
+        db.audit(
+            "TEAM_INVITE_CREATED",
+            q.from_user.id,
+            mem["agency_id"],
+            "INVITE",
+            None,
+            {"role":role,"max_uses":uses},
+        )
+        await q.edit_message_text(
+            "🔑 کد دعوت ساخته شد\n\n"
+            f"<code>{code}</code>\n"
+            f"نقش: {ROLE_LABELS[role]}\n"
+            f"ظرفیت: {uses} نفر\n"
+            "اعتبار: ۷ روز",
+            parse_mode=ParseMode.HTML,
+            reply_markup=M([[B("⬅️ تیم",callback_data="p_team")]]),
+        ); return
+
+    if a=="team_members":
+        rows=db.all_rows(
+            """SELECT id,display_name,username,role,is_active
+               FROM partner_members
+               WHERE agency_id=%s
+               ORDER BY is_active DESC,id""",
+            (mem["agency_id"],),
+        )
+        buttons=[]
+        for row in rows:
+            name=row["display_name"] or row["username"] or f"عضو {row['id']}"
+            state="✅" if row["is_active"] else "⛔️"
+            buttons.append([
+                B(
+                    f"{state} {name} — {ROLE_LABELS.get(row['role'],row['role'])}",
+                    callback_data=f"team_member_{row['id']}",
+                )
+            ])
+        buttons.append([B("⬅️ تیم",callback_data="p_team")])
+        await q.edit_message_text(
+            "⚙️ مدیریت اعضای بنگاه:",
+            reply_markup=M(buttons),
+        ); return
+
+    if a.startswith("team_member_"):
+        member_id=int(a.rsplit("_",1)[1])
+        await show_team_member(q,mem,member_id); return
+
+    if a.startswith("team_toggle_"):
+        member_id=int(a.rsplit("_",1)[1])
+        target=db.one(
+            "SELECT * FROM partner_members WHERE id=%s AND agency_id=%s",
+            (member_id,mem["agency_id"]),
+        )
+        if not target or not can_manage_target(mem,target):
+            await q.answer("اجازه تغییر این عضو را ندارید.",show_alert=True); return
+        new_state=not target["is_active"]
+        db.execute(
+            "UPDATE partner_members SET is_active=%s,updated_at=NOW() WHERE id=%s",
+            (new_state,member_id),
+        )
+        db.audit(
+            "TEAM_MEMBER_ACTIVATED" if new_state else "TEAM_MEMBER_DEACTIVATED",
+            q.from_user.id,
+            mem["agency_id"],
+            "MEMBER",
+            member_id,
+        )
+        await show_team_member(q,mem,member_id); return
+
+    if a.startswith("team_setrole_"):
+        match=re.fullmatch(
+            r"team_setrole_(\d+)_(AGENCY_ADMIN|ADVISOR|SECRETARY)",
+            a,
+        )
+        if not match:
+            await q.answer("درخواست نامعتبر است.",show_alert=True); return
+        member_id,role=int(match.group(1)),match.group(2)
+        target=db.one(
+            "SELECT * FROM partner_members WHERE id=%s AND agency_id=%s",
+            (member_id,mem["agency_id"]),
+        )
+        if not target or not can_manage_target(mem,target):
+            await q.answer("اجازه تغییر نقش این عضو را ندارید.",show_alert=True); return
+        if role=="AGENCY_ADMIN" and mem["role"]!="AGENCY_OWNER":
+            await q.answer("فقط مالک بنگاه می‌تواند مدیر تعیین کند.",show_alert=True); return
+        defaults={
+            "AGENCY_ADMIN": (True,True,True,True,True,True),
+            "ADVISOR": (True,False,True,False,False,False),
+            "SECRETARY": (True,False,False,False,False,False),
+        }[role]
+        db.execute(
+            """UPDATE partner_members
+               SET role=%s,can_add_file=%s,can_publish_own=%s,
+                   can_request_central=%s,can_manage_brand=%s,
+                   can_manage_team=%s,can_view_stats=%s,updated_at=NOW()
+               WHERE id=%s""",
+            (role,*defaults,member_id),
+        )
+        db.audit(
+            "TEAM_MEMBER_ROLE_CHANGED",
+            q.from_user.id,
+            mem["agency_id"],
+            "MEMBER",
+            member_id,
+            {"role":role},
+        )
+        await show_team_member(q,mem,member_id); return
+
+    if a.startswith("team_perm_"):
+        rest=a.replace("team_perm_","",1)
+        member_text,field=rest.split("_",1)
+        member_id=int(member_text)
+        if field not in TEAM_PERMISSIONS:
+            await q.answer("دسترسی نامعتبر است.",show_alert=True); return
+        target=db.one(
+            "SELECT * FROM partner_members WHERE id=%s AND agency_id=%s",
+            (member_id,mem["agency_id"]),
+        )
+        if not target or not can_manage_target(mem,target):
+            await q.answer("اجازه تغییر این عضو را ندارید.",show_alert=True); return
+        if field=="can_manage_team" and mem["role"]!="AGENCY_OWNER":
+            await q.answer("فقط مالک بنگاه می‌تواند این دسترسی را بدهد.",show_alert=True); return
+        new_value=not bool(target.get(field))
+        db.execute(
+            f"UPDATE partner_members SET {field}=%s,updated_at=NOW() WHERE id=%s",
+            (new_value,member_id),
+        )
+        db.audit(
+            "TEAM_PERMISSION_CHANGED",
+            q.from_user.id,
+            mem["agency_id"],
+            "MEMBER",
+            member_id,
+            {"permission":field,"enabled":new_value},
+        )
+        await show_team_member(q,mem,member_id); return
+
+    if a=="team_invites":
+        rows=db.all_rows(
+            """SELECT id,code,role,max_uses,used_count,expires_at
+               FROM partner_invites
+               WHERE agency_id=%s AND is_revoked=FALSE
+                 AND used_count<max_uses
+                 AND (expires_at IS NULL OR expires_at>NOW())
+               ORDER BY id DESC LIMIT 30""",
+            (mem["agency_id"],),
+        )
+        buttons=[
+            [
+                B(
+                    f"{r['code']} | {ROLE_LABELS.get(r['role'],r['role'])} "
+                    f"{r['used_count']}/{r['max_uses']}",
+                    callback_data=f"team_revoke_{r['id']}",
+                )
+            ]
+            for r in rows
+        ]
+        buttons.append([B("⬅️ تیم",callback_data="p_team")])
+        await q.edit_message_text(
+            "🔑 کدهای دعوت فعال\nبرای لغو، روی کد بزنید:"
+            if rows else "کد دعوت فعالی وجود ندارد.",
+            reply_markup=M(buttons),
+        ); return
+
+    if a.startswith("team_revoke_"):
+        invite_id=int(a.rsplit("_",1)[1])
+        db.execute(
+            """UPDATE partner_invites
+               SET is_revoked=TRUE
+               WHERE id=%s AND agency_id=%s""",
+            (invite_id,mem["agency_id"]),
+        )
+        db.audit(
+            "TEAM_INVITE_REVOKED",
+            q.from_user.id,
+            mem["agency_id"],
+            "INVITE",
+            invite_id,
+        )
+        await q.edit_message_text(
+            "✅ کد دعوت لغو شد.",
+            reply_markup=M([[B("⬅️ کدها",callback_data="team_invites")]]),
+        ); return
+
+
+async def show_team_member(q,actor,member_id):
+    target=db.one(
+        "SELECT * FROM partner_members WHERE id=%s AND agency_id=%s",
+        (member_id,actor["agency_id"]),
+    )
+    if not target:
+        await q.answer("عضو پیدا نشد.",show_alert=True); return
+    name=target["display_name"] or target["username"] or f"عضو {member_id}"
+    lines=[
+        f"👤 {name}",
+        f"نقش: {ROLE_LABELS.get(target['role'],target['role'])}",
+        f"وضعیت: {'فعال ✅' if target['is_active'] else 'غیرفعال ⛔️'}",
+        "",
+        "دسترسی‌ها:",
+    ]
+    for field,label in TEAM_PERMISSIONS.items():
+        lines.append(f"{'✅' if target.get(field) else '❌'} {label}")
+    buttons=[]
+    if can_manage_target(actor,target):
+        buttons.append([
+            B(
+                "⛔️ غیرفعال‌سازی" if target["is_active"] else "✅ فعال‌سازی",
+                callback_data=f"team_toggle_{member_id}",
+            )
+        ])
+        role_buttons=[
+            B("مشاور",callback_data=f"team_setrole_{member_id}_ADVISOR"),
+            B("منشی",callback_data=f"team_setrole_{member_id}_SECRETARY"),
+        ]
+        if actor["role"]=="AGENCY_OWNER":
+            role_buttons.append(
+                B("مدیر",callback_data=f"team_setrole_{member_id}_AGENCY_ADMIN")
+            )
+        buttons.append(role_buttons)
+        for field,label in TEAM_PERMISSIONS.items():
+            if field=="can_manage_team" and actor["role"]!="AGENCY_OWNER":
+                continue
+            buttons.append([
+                B(
+                    f"{'خاموش' if target.get(field) else 'روشن'}: {label}",
+                    callback_data=f"team_perm_{member_id}_{field}",
+                )
+            ])
+    buttons.append([B("⬅️ اعضا",callback_data="team_members")])
+    await q.edit_message_text(
+        "\n".join(lines),
+        reply_markup=M(buttons),
+    )
 
 
 async def agency_stats(q,mem):
