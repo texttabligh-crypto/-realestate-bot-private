@@ -246,8 +246,12 @@ checks = {
     ) and all(
         value in bot
         for value in (
+            "FORCED_SOURCE_ADDRESS_BY_UNIT_CODE",
+            '"31123": "ولیعصر لیدای جدید"',
             "_extended_location_repair_rows",
             "repair_extended_source_locations",
+            "best_candidates",
+            "source_rows=%s candidates=%s posts=%s",
             "delayed_extended_source_location_repair",
             "await asyncio.sleep(15)",
             "current_address_text not in new_address_text",
