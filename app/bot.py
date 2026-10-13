@@ -8923,7 +8923,7 @@ async def repair_explicit_source_feature_mismatches(application):
 
 
 def _extended_location_repair_rows():
-    """Return live posts whose source contains the reported named subarea."""
+    """Return live posts eligible for conservative source-location repair."""
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -8940,7 +8940,7 @@ def _extended_location_repair_rows():
                   AND p.deleted_from_channel_at IS NULL
                   AND p.published_message_id IS NOT NULL
                   AND ps.source_raw_text IS NOT NULL
-                  AND ps.source_raw_text ILIKE '%%لیدای جدید%%'
+                  AND BTRIM(ps.source_raw_text) <> ''
                 ORDER BY
                     p.id,
                     ps.is_primary DESC,
@@ -8959,9 +8959,24 @@ async def repair_extended_source_locations(application):
         parsed = parse_property(source_raw_text)
         new_address = parsed.get("address_text")
 
+        if not new_address:
+            continue
+
+        current_address_text = str(
+            current_address or ""
+        ).strip()
+        new_address_text = str(
+            new_address
+        ).strip()
+
+        # Retroactive correction is intentionally conservative:
+        # only replace an existing short address when the newly parsed
+        # source address contains it and adds more location detail.
         if (
-            not new_address
-            or "لیدای جدید" not in new_address
+            not current_address_text
+            or new_address_text == current_address_text
+            or len(new_address_text) <= len(current_address_text)
+            or current_address_text not in new_address_text
         ):
             continue
 
@@ -8979,15 +8994,14 @@ async def repair_extended_source_locations(application):
 
         save_property_address(
             property_id,
-            new_address,
+            new_address_text,
         )
         save_property_attributes(
             property_id,
             list(merged_attributes.values()),
         )
 
-        if new_address != current_address:
-            repaired.append(int(property_id))
+        repaired.append(int(property_id))
 
         try:
             await refresh_published_property_post(
