@@ -470,7 +470,7 @@ async def escalate_customer_question(bot, user, customer_id, question_text):
         name = " ".join(part for part in (user.first_name, user.last_name) if part) or "بدون نام"
         markup = InlineKeyboardMarkup([[InlineKeyboardButton(
             "✍️ پاسخ به مشتری", callback_data=f"crm_support_reply_{ticket_id}"
-        )]])
+        )], [InlineKeyboardButton("💬 مشاهدهٔ گفتگو", callback_data=f"crm_support_history_{ticket_id}_0")]])
         for chat_id in await asyncio.to_thread(_support_manager_chat_ids):
             try:
                 await bot.send_message(
@@ -518,6 +518,23 @@ async def handle_button(update, context, session):
     action = (query.data if query else "") or ""
     if not action.startswith("crm_campaign") and not action.startswith("crm_support"):
         return False
+
+    if action.startswith("crm_support_history_"):
+        from customer_transcript import history_page
+        ticket_id, offset = map(int, action.rsplit('_', 2)[1:])
+        row = await asyncio.to_thread(_support_ticket, ticket_id)
+        if not row or offset < 0:
+            return True
+        chunks, more = await asyncio.to_thread(history_page, row[2], offset)
+        nav = []
+        if offset:
+            nav.append(InlineKeyboardButton('◀️ قبلی', callback_data=f'crm_support_history_{ticket_id}_{max(0,offset-8)}'))
+        if more:
+            nav.append(InlineKeyboardButton('بعدی ▶️', callback_data=f'crm_support_history_{ticket_id}_{offset+8}'))
+        keyboard = ([nav] if nav else []) + [[InlineKeyboardButton('✍️ پاسخ به مشتری', callback_data=f'crm_support_reply_{ticket_id}')]]
+        for index, chunk in enumerate(chunks):
+            await query.message.reply_text(chunk, reply_markup=InlineKeyboardMarkup(keyboard) if index==len(chunks)-1 else None)
+        return True
 
     if action == "crm_campaigns" or action.startswith("crm_campaign_page_"):
         offset = int(action.rsplit("_", 1)[1]) if action.startswith("crm_campaign_page_") else 0
@@ -599,7 +616,7 @@ async def handle_button(update, context, session):
             return True
         await query.edit_message_text(
             f"💬 سؤال #{row[0]}\n\nمشتری: {row[6]}\n📞 {row[7]}\nCRM: #{row[1] or '-'}\n\n{row[3]}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✍️ پاسخ", callback_data=f"crm_support_reply_{ticket_id}")],[InlineKeyboardButton("⬅️ صندوق سؤال‌ها", callback_data="crm_support_inbox")]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 مشاهدهٔ گفتگو", callback_data=f"crm_support_history_{ticket_id}_0")],[InlineKeyboardButton("✍️ پاسخ", callback_data=f"crm_support_reply_{ticket_id}")],[InlineKeyboardButton("⬅️ صندوق سؤال‌ها", callback_data="crm_support_inbox")]]),
         )
         return True
 
@@ -663,3 +680,4 @@ async def handle_text(update, context, session):
         await update.message.reply_text("✅ پاسخ مستقیم برای مشتری ارسال شد.", reply_markup=_back("crm_support_inbox"))
         return True
     return False
+
