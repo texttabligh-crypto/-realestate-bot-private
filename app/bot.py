@@ -16,6 +16,7 @@ from logging_security import secure_telegram_logging
 from telegram_delivery import edit_published_message
 from telegram.error import RetryAfter, TimedOut
 
+from composite_search import composite_text_predicates
 from property_filter import classify_property
 from property_parser import parse_property, parse_dynamic_attributes, parse_rule_attributes, parse_source_unit_code
 from publisher import get_property_for_publish, build_publish_text, publish_property, get_property_media, republish_property, get_destination_channel
@@ -6497,109 +6498,11 @@ def smart_search_properties(raw_query, offset=0, limit=10):
     free_text = filters["free_text"]
 
     if free_text:
-        needle = f"%{free_text}%"
-
-        # -------------------------------------------------
-        # Location-first search
-        #
-        # If the entered phrase is actually present in the
-        # normalized district/address of at least one live
-        # property, treat it as a LOCATION search.
-        #
-        # Example:
-        #   باغمیشه
-        #
-        # must not match another district merely because
-        # "باغمیشه" appears somewhere in raw source text.
-        # -------------------------------------------------
-
-        with db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT 1
-                    FROM properties p
-                    WHERE p.status = 'ACTIVE'
-                      AND p.published_message_id IS NOT NULL
-                      AND p.deleted_from_channel_at IS NULL
-                      AND p.created_at >= NOW() - (%s * INTERVAL '1 week')
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM property_trash pt
-                          WHERE pt.property_id = p.id
-                      )
-                      AND (
-                          COALESCE(p.district, '') ILIKE %s
-                          OR COALESCE(p.address_text, '') ILIKE %s
-                      )
-                    LIMIT 1
-                    """,
-                    (
-                        validity_weeks,
-                        needle,
-                        needle,
-                    ),
-                )
-
-                location_match = (
-                    cur.fetchone() is not None
-                )
-
-        if location_match:
-            where.append(
-                """
-                (
-                    COALESCE(p.district, '') ILIKE %s
-                    OR COALESCE(p.address_text, '') ILIKE %s
-                )
-                """
-            )
-
-            params.extend(
-                [
-                    needle,
-                    needle,
-                ]
-            )
-
-        else:
-            # General free-text search for non-location
-            # phrases such as attributes/features.
-            where.append(
-                """
-                (
-                    COALESCE(p.unit_code, '') ILIKE %s
-                    OR COALESCE(p.district, '') ILIKE %s
-                    OR COALESCE(p.address_text, '') ILIKE %s
-                    OR COALESCE(p.floor_text, '') ILIKE %s
-                    OR COALESCE(p.raw_text, '') ILIKE %s
-                    OR COALESCE(p.area_m2::text, '') ILIKE %s
-                    OR COALESCE(p.current_price_billion::text, '') ILIKE %s
-                    OR EXISTS (
-                        SELECT 1
-                        FROM property_attributes pa
-                        WHERE pa.property_id = p.id
-                          AND (
-                              COALESCE(pa.attribute_label, '') ILIKE %s
-                              OR COALESCE(pa.attribute_value, '') ILIKE %s
-                          )
-                    )
-                    OR EXISTS (
-                        SELECT 1
-                        FROM property_sources ps
-                        WHERE ps.property_id = p.id
-                          AND COALESCE(
-                              ps.source_unit_code,
-                              ''
-                          ) ILIKE %s
-                    )
-                )
-                """
-            )
-
-            params.extend(
-                [needle] * 10
-            )
+        text_clauses, text_params = composite_text_predicates(
+            free_text
+        )
+        where.extend(text_clauses)
+        params.extend(text_params)
 
     # Bare number such as "60":
     # If there were no structured filters, treat it as
