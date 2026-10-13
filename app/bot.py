@@ -9012,11 +9012,7 @@ async def repair_extended_source_locations(application):
             )
         )
 
-        if (
-            not forced_address
-            or str(current_address or "").strip()
-            == forced_address
-        ):
+        if not forced_address:
             continue
 
         save_property_address(
@@ -9025,11 +9021,12 @@ async def repair_extended_source_locations(application):
         )
 
         try:
-            await refresh_published_property_post(
+            updated = await refresh_published_property_post(
                 application.bot,
                 property_id,
             )
-            forced_repaired.append(int(property_id))
+            if updated:
+                forced_repaired.append(int(property_id))
         except Exception:
             logging.exception(
                 "Forced source location post refresh failed: "
@@ -9071,8 +9068,7 @@ async def repair_extended_source_locations(application):
         if (
             not current_address_text
             or not new_address_text
-            or new_address_text == current_address_text
-            or len(new_address_text) <= len(current_address_text)
+            or len(new_address_text) < len(current_address_text)
             or current_address_text not in new_address_text
         ):
             continue
@@ -9094,34 +9090,25 @@ async def repair_extended_source_locations(application):
         source_raw_text = candidate["source_raw_text"]
         new_address_text = candidate["address"]
 
-        dynamic_attributes = parse_dynamic_attributes(
-            source_raw_text
-        )
-        rule_attributes = parse_rule_attributes(
-            source_raw_text,
-            get_active_attribute_rules(),
-        )
-        merged_attributes = {
-            item["attribute_key"]: item
-            for item in dynamic_attributes + rule_attributes
-        }
-
-        save_property_address(
-            property_id,
-            new_address_text,
-        )
-        save_property_attributes(
-            property_id,
-            list(merged_attributes.values()),
-        )
-
-        repaired.append(int(property_id))
-
+        # Re-send even if the database already contains the precise
+        # address: a prior Telegram edit may have failed after DB save.
+        # Location-only repair must not modify unrelated attributes.
         try:
-            await refresh_published_property_post(
+            save_property_address(
+                property_id,
+                new_address_text,
+            )
+            updated = await refresh_published_property_post(
                 application.bot,
                 property_id,
             )
+            if updated:
+                repaired.append(int(property_id))
+                logging.info(
+                    "LOCATION_POST_SYNCED unit_code=%s property_id=%s",
+                    candidate["unit_code"],
+                    property_id,
+                )
         except Exception:
             logging.exception(
                 "Extended source location post refresh failed: "
