@@ -236,6 +236,22 @@ checks = {
             "deleted_count",
         )
     ),
+    "source_location_fidelity_and_backfill": all(
+        value in parser
+        for value in (
+            "headline_location_match",
+            "پیش فروش آپارتمان | ولیعصر لیدای جدید",
+            "more precise «ولیعصر لیدای جدید»",
+        )
+    ) and all(
+        value in bot
+        for value in (
+            "_extended_location_repair_rows",
+            "repair_extended_source_locations",
+            "current_address_text not in new_address_text",
+            "start_extended_source_location_repair(application)",
+        )
+    ),
     "explicit_source_facility_repair": all(
         value in bot
         for value in (
@@ -366,6 +382,15 @@ from app.phone_utils import normalize_iran_phone
 
 if str(parse_price_billion("قیمت کل: ۵ میلیارد ۶۰۰ تومان")) != "5.6":
     raise SystemExit("colloquial decimal price regression")
+
+extended_location = parse_property(
+    "پیش فروش آپارتمان | ولیعصر لیدای جدید\n"
+    "۱۲۵ متر | ۲ خواب"
+)
+if extended_location["district"] != "ولیعصر":
+    raise SystemExit("extended location district regression")
+if extended_location["address_text"] != "ولیعصر لیدای جدید":
+    raise SystemExit("extended location address regression")
 
 negative_elevator_samples = (
     "بدون آسانسور",

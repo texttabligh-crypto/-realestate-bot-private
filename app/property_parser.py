@@ -701,6 +701,37 @@ def parse_address_text(text: str):
 
             return value
 
+    # Preserve the full named location after a property headline separator.
+    # Example:
+    #   پیش فروش آپارتمان | ولیعصر لیدای جدید
+    # The district remains «ولیعصر», while address_text must keep the
+    # more precise «ولیعصر لیدای جدید».
+    headline_location_match = re.search(
+        r"(?:^|\n)\s*"
+        r"(?:پیش[‌ _-]*فروش|فروش)\s+"
+        r"(?:آپارتمان|واحد|ملک)\s*"
+        r"(?:\||[-–—:：])\s*"
+        r"([^\n\r|،,؛;]{2,80})",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if headline_location_match:
+        value = _canonicalize_location_text(
+            headline_location_match.group(1).strip()
+        )
+        value = re.split(
+            r"\s+(?:"
+            r"\d+(?:\.\d+)?\s*متر(?:ی)?"
+            r"|متراژ|طبقه|قیمت|\d+\s*خواب"
+            r"|کد\s*(?:واحد|فایل|ملک|آگهی)"
+            r")",
+            value,
+            maxsplit=1,
+        )[0].strip()
+        if value:
+            return value[:255]
+
     contextual_district = (
         _extract_contextual_known_district(text)
     )
