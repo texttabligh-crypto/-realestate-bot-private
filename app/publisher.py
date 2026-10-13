@@ -1263,11 +1263,79 @@ async def _clear_property_reply_markup(
             raise
 
 
+def refresh_property_location_from_raw_text(
+    property_id,
+):
+    """Reparse location immediately before publish/republish."""
+    from property_parser import parse_property
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT address_text, raw_text
+                FROM properties
+                WHERE id = %s
+                LIMIT 1
+                """,
+                (property_id,),
+            )
+            row = cur.fetchone()
+
+            if not row:
+                return False
+
+            current_address, raw_text = row
+
+            if not raw_text:
+                return False
+
+            new_address = parse_property(
+                raw_text
+            ).get("address_text")
+            current_text = str(
+                current_address or ""
+            ).strip()
+            new_text = str(
+                new_address or ""
+            ).strip()
+
+            if not new_text:
+                return False
+
+            is_more_precise = (
+                not current_text
+                or (
+                    len(new_text) > len(current_text)
+                    and current_text in new_text
+                )
+            )
+
+            if not is_more_precise:
+                return False
+
+            cur.execute(
+                """
+                UPDATE properties
+                SET address_text = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (new_text, property_id),
+            )
+            conn.commit()
+            return True
+
+
 # === PUBLISH POST-SUCCESS CLEANUP V1 ===
 async def publish_property(
     bot,
     property_id,
 ):
+    refresh_property_location_from_raw_text(
+        property_id
+    )
+
     result = await _publish_final_visit_link_original(
         bot,
         property_id,
@@ -1296,6 +1364,10 @@ async def republish_property(
     bot,
     property_id,
 ):
+    refresh_property_location_from_raw_text(
+        property_id
+    )
+
     result = await _republish_final_visit_link_original(
         bot,
         property_id,
