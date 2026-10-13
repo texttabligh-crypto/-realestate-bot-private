@@ -476,3 +476,15 @@ for raw_phone, expected_phone in phone_cases.items():
         raise SystemExit(f"phone normalization regression: {raw_phone}")
 
 print("ADVANCED_SMART_SEARCH_V2_SMOKE_OK")
+
+# Real source layout: emoji heading, separator, then wrapped location.
+for location in ("ولیعصر مولوی", "ولیعصر لیدای جدید"):
+    for prefix in ("🏡 ", "🏠 ", "🏡️ ", ""):
+        sample = (
+            "#ولیعصر\n"
+            + prefix + "پیش فروش آپارتمان |\n"
+            + location + "\n\n"
+            + "۱۲۰ متر | ۲ خواب\nطبقه ۵ جنوبی نبش"
+        )
+        if parse_property(sample)["address_text"] != location:
+            raise SystemExit("emoji wrapped headline location regression")
