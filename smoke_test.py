@@ -239,9 +239,9 @@ checks = {
     "source_location_fidelity_and_backfill": all(
         value in parser
         for value in (
-            "headline_location_match",
-            "پیش فروش آپارتمان | ولیعصر لیدای جدید",
-            "more precise «ولیعصر لیدای جدید»",
+            "_extract_headline_location",
+            "strict extension of a shorter",
+            "headline_location",
         )
     ) and all(
         value in bot
@@ -393,6 +393,17 @@ if extended_location["district"] != "ولیعصر":
     raise SystemExit("extended location district regression")
 if extended_location["address_text"] != "ولیعصر لیدای جدید":
     raise SystemExit("extended location address regression")
+
+extended_location_with_short_pin = parse_property(
+    "📍 ولیعصر\n"
+    "پیش فروش آپارتمان | ولیعصر لیدای جدید\n"
+    "۱۲۵ متر | ۲ خواب"
+)
+if (
+    extended_location_with_short_pin["address_text"]
+    != "ولیعصر لیدای جدید"
+):
+    raise SystemExit("short pin masked precise headline regression")
 
 negative_elevator_samples = (
     "بدون آسانسور",
