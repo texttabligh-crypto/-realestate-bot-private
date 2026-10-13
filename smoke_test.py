@@ -7,7 +7,14 @@ ROOT = PROJECT_ROOT / "app"
 PARTNER_APP = (PROJECT_ROOT / "partner_hub" / "app.py").read_text(
     encoding="utf-8"
 )
+PARTNER_DB = (PROJECT_ROOT / "partner_hub" / "db.py").read_text(
+    encoding="utf-8"
+)
+PARTNER_MIGRATION = (
+    PROJECT_ROOT / "partner_hub" / "migrations" / "002_team_availability.sql"
+).read_text(encoding="utf-8")
 ast.parse(PARTNER_APP)
+ast.parse(PARTNER_DB)
 NAMES = (
     "bot.py",
     "shahfile_ai.py",
@@ -52,6 +59,40 @@ checks = {
             'BotCommand("start", "شروع ربات")',
             'BotCommand("menu", "منوی اصلی")',
             "await configure_blue_menu(app)",
+        )
+    ),
+    "partner_team_and_three_day_availability": all(
+        value in PARTNER_APP
+        for value in (
+            "TEAM_PERMISSIONS",
+            "team_invrole_SECRETARY",
+            "team_invuses_",
+            "TEAM_MEMBER_DEACTIVATED",
+            "Partner three-day availability worker started.",
+            "availability_check_due_at",
+            "availability_missed_cycles",
+            "interval '3 days'",
+            "interval '1 hour'",
+            "tenant availability delivery unavailable; using hub bot",
+        )
+    ) and all(
+        value in PARTNER_DB
+        for value in (
+            "ensure_partner_v2_schema",
+            "can_manage_team",
+            "can_view_stats",
+            "availability_check_due_at",
+            "availability_missed_cycles",
+            "interval '3 days'",
+        )
+    ) and all(
+        value in PARTNER_MIGRATION
+        for value in (
+            "SECRETARY",
+            "can_manage_team",
+            "can_view_stats",
+            "is_revoked",
+            "availability_check_due_at",
         )
     ),
     "scheduler_supervisor_watchdog": all(
