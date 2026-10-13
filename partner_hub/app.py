@@ -926,6 +926,410 @@ def add_handlers(app):
     app.add_handler(CallbackQueryHandler(on_callback)); app.add_handler(MessageHandler(filters.PHOTO,handle_photo)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,handle_text))
 
 
+def availability_keyboard(submission_id):
+    return M([
+        [
+            B("✅ موجود است",callback_data=f"avail_yes_{submission_id}"),
+            B("💰 تغییر قیمت",callback_data=f"avail_price_{submission_id}"),
+        ],
+        [B("❌ فروخته / حذف شد",callback_data=f"avail_sold_{submission_id}")],
+    ])
+
+
+def availability_authorized(mem,submission):
+    return bool(
+        mem
+        and mem["agency_id"]==submission["agency_id"]
+        and (
+            mem["role"] in ("AGENCY_OWNER","AGENCY_ADMIN")
+            or mem["id"]==submission["submitted_by_member_id"]
+        )
+    )
+
+
+async def agency_delivery_bot(hub_app,agency_id):
+    connection=db.one(
+        """SELECT encrypted_token
+           FROM partner_bot_connections
+           WHERE agency_id=%s AND status='ACTIVE'""",
+        (agency_id,),
+    )
+    if connection:
+        return Bot(decrypt_token(connection["encrypted_token"]))
+    return hub_app.bot
+
+
+async def send_availability_prompt(hub_app,submission,reminder=False):
+    bot=await agency_delivery_bot(hub_app,submission["agency_id"])
+    prefix="🔔 یادآوری تأیید فایل" if reminder else "🏠 تأیید موجودی فایل"
+    text=(
+        f"{prefix}\n\n"
+        f"کد: {submission['tracking_code']}\n"
+        f"{submission['district']} | {submission['area_m2']} متر\n\n"
+        "این فایل هنوز موجود است؟"
+    )
+    await bot.send_message(
+        submission["telegram_user_id"],
+        text,
+        reply_markup=availability_keyboard(submission["id"]),
+    )
+
+
+async def refresh_agency_channel_post(submission_id,note=None):
+    row=db.one(
+        """SELECT s.*,j.telegram_message_id,c.telegram_channel_id,
+                  b.encrypted_token
+           FROM partner_submissions s
+           JOIN partner_publication_jobs j ON j.submission_id=s.id
+           JOIN partner_channel_connections c ON c.id=j.channel_connection_id
+           JOIN partner_bot_connections b ON b.agency_id=s.agency_id
+           WHERE s.id=%s
+             AND j.target_type='AGENCY_CHANNEL'
+             AND j.status='PUBLISHED'
+             AND j.telegram_message_id IS NOT NULL
+             AND b.status='ACTIVE'
+           ORDER BY j.published_at DESC,j.id DESC
+           LIMIT 1""",
+        (submission_id,),
+    )
+    if not row:
+        return
+    caption=public_caption(row,db.brand(row["agency_id"]))
+    if note:
+        caption+=f"\n\n{note}"
+    media=db.one(
+        "SELECT id FROM partner_submission_media WHERE submission_id=%s LIMIT 1",
+        (submission_id,),
+    )
+    bot=Bot(decrypt_token(row["encrypted_token"]))
+    try:
+        if media:
+            await bot.edit_message_caption(
+                chat_id=row["telegram_channel_id"],
+                message_id=row["telegram_message_id"],
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await bot.edit_message_text(
+                chat_id=row["telegram_channel_id"],
+                message_id=row["telegram_message_id"],
+                text=caption,
+                parse_mode=ParseMode.HTML,
+            )
+    except TelegramError:
+        log.exception(
+            "partner channel refresh failed submission=%s",
+            submission_id,
+        )
+
+
+def confirm_submission_availability(submission_id):
+    db.execute(
+        """UPDATE partner_submissions
+           SET status='ACTIVE',
+               last_availability_confirmed_at=NOW(),
+               availability_check_due_at=NOW()+interval '3 days',
+               availability_check_sent_at=NULL,
+               availability_reminder_sent_at=NULL,
+               availability_missed_cycles=0,
+               availability_paused_at=NULL,
+               status_before_availability_pause=NULL,
+               availability_last_error=NULL,
+               updated_at=NOW()
+           WHERE id=%s AND status IN('ACTIVE','INACTIVE')""",
+        (submission_id,),
+    )
+    row=db.one(
+        "SELECT central_property_id FROM partner_submissions WHERE id=%s",
+        (submission_id,),
+    )
+    if row and row.get("central_property_id"):
+        db.execute(
+            "UPDATE properties SET status='ACTIVE',updated_at=NOW() WHERE id=%s",
+            (row["central_property_id"],),
+        )
+
+
+async def availability_callback(q,context,a,mem):
+    match=re.fullmatch(r"avail_(yes|price|sold)_(\d+)",a)
+    if not match:
+        await q.answer("درخواست نامعتبر است.",show_alert=True); return
+    action,submission_id=match.group(1),int(match.group(2))
+    submission=db.one(
+        "SELECT * FROM partner_submissions WHERE id=%s",
+        (submission_id,),
+    )
+    if not submission or not availability_authorized(mem,submission):
+        await q.answer("اجازه مدیریت این فایل را ندارید.",show_alert=True); return
+
+    if action=="yes":
+        if submission["status"]=="SOLD":
+            await q.answer("فایل فروخته‌شده قابل فعال‌سازی نیست.",show_alert=True); return
+        confirm_submission_availability(submission_id)
+        db.audit(
+            "SUBMISSION_AVAILABILITY_CONFIRMED",
+            q.from_user.id,
+            mem["agency_id"],
+            "SUBMISSION",
+            submission_id,
+        )
+        await refresh_agency_channel_post(submission_id)
+        await q.edit_message_text(
+            "✅ موجودی فایل تأیید شد. سه روز دیگر دوباره بررسی می‌شود."
+        ); return
+
+    if action=="price":
+        context.user_data.clear()
+        context.user_data.update(
+            flow="availability_price",
+            availability_submission_id=submission_id,
+        )
+        await q.edit_message_text(
+            "قیمت جدید کل ملک را ارسال کنید.\nمثال: ۷.۸ میلیارد"
+        ); return
+
+    db.execute(
+        """UPDATE partner_submissions
+           SET status='SOLD',
+               availability_check_due_at=NULL,
+               availability_check_sent_at=NULL,
+               availability_reminder_sent_at=NULL,
+               availability_last_error=NULL,
+               updated_at=NOW()
+           WHERE id=%s""",
+        (submission_id,),
+    )
+    if submission.get("central_property_id"):
+        db.execute(
+            "UPDATE properties SET status='INACTIVE',updated_at=NOW() WHERE id=%s",
+            (submission["central_property_id"],),
+        )
+    await refresh_agency_channel_post(
+        submission_id,
+        "⛔️ این فایل دیگر موجود نیست.",
+    )
+    db.audit(
+        "SUBMISSION_MARKED_SOLD",
+        q.from_user.id,
+        mem["agency_id"],
+        "SUBMISSION",
+        submission_id,
+    )
+    await q.edit_message_text("✅ فایل از وضعیت موجود خارج شد.")
+
+
+async def availability_price_text(update,context):
+    mem=db.member(update.effective_user.id)
+    submission_id=context.user_data.get("availability_submission_id")
+    submission=db.one(
+        "SELECT * FROM partner_submissions WHERE id=%s",
+        (submission_id,),
+    )
+    if not submission or not availability_authorized(mem,submission):
+        context.user_data.clear()
+        await update.message.reply_text("اجازه تغییر این فایل را ندارید."); return
+    try:
+        new_price=price(update.message.text)
+    except Exception:
+        await update.message.reply_text(
+            "قیمت قابل تشخیص نیست. مثال: ۷.۸ میلیارد"
+        ); return
+
+    db.execute(
+        """UPDATE partner_submissions
+           SET current_price_toman=%s,updated_at=NOW()
+           WHERE id=%s""",
+        (new_price,submission_id),
+    )
+    if submission.get("central_property_id"):
+        pcols=db.table_columns("properties")
+        assignments=[]
+        params=[]
+        if "current_price_toman" in pcols:
+            assignments.append("current_price_toman=%s")
+            params.append(new_price)
+        if "current_price_billion" in pcols:
+            assignments.append("current_price_billion=%s")
+            params.append(new_price/1_000_000_000)
+        if assignments:
+            assignments.append("updated_at=NOW()")
+            params.append(submission["central_property_id"])
+            db.execute(
+                f"UPDATE properties SET {','.join(assignments)} WHERE id=%s",
+                params,
+            )
+
+    confirm_submission_availability(submission_id)
+    await refresh_agency_channel_post(submission_id)
+    db.audit(
+        "SUBMISSION_PRICE_AND_AVAILABILITY_UPDATED",
+        update.effective_user.id,
+        mem["agency_id"],
+        "SUBMISSION",
+        submission_id,
+        {"current_price_toman":new_price},
+    )
+    context.user_data.clear()
+    await update.message.reply_text(
+        "✅ قیمت به‌روزرسانی و موجودی فایل برای سه روز تأیید شد.",
+        reply_markup=home_keyboard(mem),
+    )
+
+
+async def pause_unconfirmed_submission(hub_app,submission):
+    db.execute(
+        """UPDATE partner_submissions
+           SET status_before_availability_pause=status,
+               status='INACTIVE',
+               availability_paused_at=NOW(),
+               availability_check_due_at=NULL,
+               availability_check_sent_at=NULL,
+               availability_reminder_sent_at=NULL,
+               updated_at=NOW()
+           WHERE id=%s AND status='ACTIVE'""",
+        (submission["id"],),
+    )
+    if submission.get("central_property_id"):
+        db.execute(
+            "UPDATE properties SET status='INACTIVE',updated_at=NOW() WHERE id=%s",
+            (submission["central_property_id"],),
+        )
+    await refresh_agency_channel_post(
+        submission["id"],
+        "⏸ اعتبار فایل در انتظار تأیید مشاور است.",
+    )
+    bot=await agency_delivery_bot(hub_app,submission["agency_id"])
+    try:
+        await bot.send_message(
+            submission["telegram_user_id"],
+            "⏸ چون دو نوبت به تأیید موجودی پاسخ داده نشد، "
+            f"فایل {submission['tracking_code']} موقتاً غیرفعال شد.\n"
+            "اگر هنوز موجود است، آن را دوباره فعال کنید.",
+            reply_markup=M([[
+                B(
+                    "✅ فعال‌سازی مجدد",
+                    callback_data=f"avail_yes_{submission['id']}",
+                )
+            ]]),
+        )
+    except TelegramError as exc:
+        log.warning(
+            "availability pause notice failed submission=%s error=%s",
+            submission["id"],
+            exc,
+        )
+    db.audit(
+        "SUBMISSION_AUTO_PAUSED",
+        None,
+        submission["agency_id"],
+        "SUBMISSION",
+        submission["id"],
+        {"reason":"two_unanswered_cycles"},
+    )
+
+
+async def run_availability_cycle(hub_app):
+    expired=db.all_rows(
+        """SELECT s.*,m.telegram_user_id
+           FROM partner_submissions s
+           JOIN partner_members m ON m.id=s.submitted_by_member_id
+           WHERE s.status='ACTIVE'
+             AND s.availability_check_sent_at IS NOT NULL
+             AND s.availability_check_sent_at<=NOW()-interval '3 days'
+           ORDER BY s.availability_check_sent_at
+           LIMIT 100"""
+    )
+    for row in expired:
+        if row["availability_missed_cycles"]>=1:
+            await pause_unconfirmed_submission(hub_app,row)
+        else:
+            db.execute(
+                """UPDATE partner_submissions
+                   SET availability_missed_cycles=1,
+                       availability_check_due_at=NOW(),
+                       availability_check_sent_at=NULL,
+                       availability_reminder_sent_at=NULL,
+                       updated_at=NOW()
+                   WHERE id=%s""",
+                (row["id"],),
+            )
+
+    reminders=db.all_rows(
+        """SELECT s.*,m.telegram_user_id
+           FROM partner_submissions s
+           JOIN partner_members m ON m.id=s.submitted_by_member_id
+           WHERE s.status='ACTIVE'
+             AND s.availability_check_sent_at IS NOT NULL
+             AND s.availability_reminder_sent_at IS NULL
+             AND s.availability_check_sent_at<=NOW()-interval '1 day'
+           ORDER BY s.availability_check_sent_at
+           LIMIT 100"""
+    )
+    for row in reminders:
+        error=None
+        try:
+            await send_availability_prompt(hub_app,row,reminder=True)
+        except Exception as exc:
+            error=str(exc)[:1000]
+            log.warning(
+                "availability reminder failed submission=%s error=%s",
+                row["id"],
+                exc,
+            )
+        db.execute(
+            """UPDATE partner_submissions
+               SET availability_reminder_sent_at=NOW(),
+                   availability_last_error=%s,
+                   updated_at=NOW()
+               WHERE id=%s""",
+            (error,row["id"]),
+        )
+
+    due=db.all_rows(
+        """SELECT s.*,m.telegram_user_id
+           FROM partner_submissions s
+           JOIN partner_members m ON m.id=s.submitted_by_member_id
+           WHERE s.status='ACTIVE'
+             AND s.availability_check_due_at<=NOW()
+             AND s.availability_check_sent_at IS NULL
+           ORDER BY s.availability_check_due_at
+           LIMIT 100"""
+    )
+    for row in due:
+        error=None
+        try:
+            await send_availability_prompt(hub_app,row)
+        except Exception as exc:
+            error=str(exc)[:1000]
+            log.warning(
+                "availability prompt failed submission=%s error=%s",
+                row["id"],
+                exc,
+            )
+        db.execute(
+            """UPDATE partner_submissions
+               SET availability_check_sent_at=NOW(),
+                   availability_reminder_sent_at=NULL,
+                   availability_last_error=%s,
+                   updated_at=NOW()
+               WHERE id=%s""",
+            (error,row["id"]),
+        )
+
+
+async def availability_worker(hub_app):
+    log.info("Partner three-day availability worker started.")
+    while True:
+        try:
+            await run_availability_cycle(hub_app)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("partner availability worker cycle")
+        await asyncio.sleep(300)
+
+
 async def tenant_supervisor(hub_app:Application):
     """Hot-load each agency bot as a white-label Telegram front end."""
     running={}
