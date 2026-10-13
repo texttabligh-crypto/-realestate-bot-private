@@ -38,6 +38,23 @@ FIELDS = [
 ]
 TYPE_KEYS = {"آپارتمان":"APARTMENT","ویلایی":"VILLA","زمین":"LAND","تجاری":"COMMERCIAL","اداری":"OFFICE","کلنگی":"OLD_HOUSE"}
 DEAL_KEYS = {"فروش":"SALE","رهن و اجاره":"RENT","مشارکت":"PARTNERSHIP","معاوضه":"EXCHANGE"}
+ROLE_LABELS = {
+    "AGENCY_OWNER": "مالک بنگاه",
+    "AGENCY_ADMIN": "مدیر",
+    "ADVISOR": "مشاور",
+    "SECRETARY": "منشی",
+}
+TEAM_PERMISSIONS = {
+    "can_add_file": "ثبت فایل",
+    "can_publish_own": "انتشار در کانال بنگاه",
+    "can_request_central": "ارسال برای کانال مرکزی",
+    "can_manage_brand": "مدیریت برند",
+    "can_manage_team": "مدیریت تیم",
+    "can_view_stats": "مشاهده آمار",
+}
+AVAILABILITY_INTERVAL = timedelta(days=3)
+AVAILABILITY_REMINDER_DELAY = timedelta(days=1)
+AVAILABILITY_CYCLE_TIMEOUT = timedelta(days=3)
 
 
 def digits(value):
@@ -129,6 +146,8 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
         await owner_callback(q,context,a); return
     if not mem or mem["agency_status"]!="ACTIVE":
         await q.edit_message_text("عضویت شما هنوز فعال نیست.",reply_markup=home_keyboard(mem,uid==OWNER_ID)); return
+    if a.startswith("avail_"):
+        await availability_callback(q,context,a,mem); return
     if a=="p_add": await begin_property(q,context); return
     if a.startswith("pf_") or a.startswith("ptype_") or a.startswith("deal_"):
         await property_callback(q,context,a,mem); return
@@ -137,9 +156,12 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if a.startswith("brand_"): await brand_callback(q,context,a,mem); return
     if a=="p_connect": await connection_menu(q,mem); return
     if a.startswith("conn_"): await connection_callback(q,context,a,mem); return
-    if a=="p_team": await team_menu(q,mem); return
-    if a=="team_invite": await create_invite(q,mem); return
-    if a=="p_stats": await agency_stats(q,mem); return
+    if a=="p_team" or a.startswith("team_"):
+        await team_callback(q,context,a,mem); return
+    if a=="p_stats":
+        if not (mem["role"] == "AGENCY_OWNER" or mem.get("can_view_stats")):
+            await q.answer("دسترسی مشاهده آمار ندارید.",show_alert=True); return
+        await agency_stats(q,mem); return
 
 
 REG_FIELDS=[("legal_name","نام رسمی بنگاه"),("brand_name","نام تجاری"),("city","شهر"),("address_text","آدرس دفتر"),("license_number","شماره جواز کسب؛ اگر ندارید خط تیره بفرستید"),("manager_name","نام مدیر"),("manager_phone","شماره تماس مدیر")]
@@ -158,6 +180,7 @@ async def handle_text(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if flow=="connect_bot": await connect_bot_text(update,context); return
     if flow=="connect_channel": await connect_channel_text(update,context); return
     if flow=="schedule": await schedule_text(update,context); return
+    if flow=="availability_price": await availability_price_text(update,context); return
     await update.message.reply_text("از منوی اصلی انتخاب کنید.",reply_markup=home_keyboard(db.member(update.effective_user.id),update.effective_user.id==OWNER_ID))
 
 
@@ -547,9 +570,14 @@ async def schedule_worker(app:Application):
 
 
 async def post_init(app):
+    db.ensure_partner_v2_schema()
     await configure_blue_menu(app)
     asyncio.create_task(tenant_supervisor(app),name="tenant-supervisor")
     asyncio.create_task(schedule_worker(app),name="partner-schedule-worker")
+    asyncio.create_task(
+        availability_worker(app),
+        name="partner-availability-worker",
+    )
 
 
 def main():
