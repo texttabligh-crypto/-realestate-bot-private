@@ -660,7 +660,9 @@ def _extract_contextual_known_district(text: str):
 def _extract_headline_location(text: str):
     """Return the complete location written in the property headline."""
     match = re.search(
-        r"(?:^|\n)\s*"
+        # Source headings commonly start with emoji, including variation
+        # selectors, and wrap the address onto the following line.
+        r"(?:^|\n)[^\w\n]*"
         r"(?:پیش[‌ _-]*فروش|فروش)\s+"
         r"(?:آپارتمان|واحد|ملک)\s*"
         r"(?:\||[-–—:：])\s*"
