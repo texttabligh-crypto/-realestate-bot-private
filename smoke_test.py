@@ -381,6 +381,24 @@ for sample in negative_elevator_samples:
 if parse_property("دارای آسانسور")["has_elevator"] is not True:
     raise SystemExit("positive elevator regression")
 
+source_detail_sample = """
+✨ ویژگی‌های ملک
+▪️ سازنده مطمئن
+▪️ پاسیو حذف/خواب‌ها دارای پنجره✅
+"""
+source_detail_values = [
+    item["attribute_value"]
+    for item in parse_dynamic_attributes(source_detail_sample)
+    if item["attribute_key"].startswith("source_detail_")
+]
+if not any("سازنده مطمئن" in value for value in source_detail_values):
+    raise SystemExit("builder source detail regression")
+if not any(
+    "پاسیو حذف" in value and "پنجره" in value
+    for value in source_detail_values
+):
+    raise SystemExit("patio/window source detail regression")
+
 def deed_value(sample):
     for item in parse_dynamic_attributes(sample):
         if item["attribute_key"] == "deed_type":
