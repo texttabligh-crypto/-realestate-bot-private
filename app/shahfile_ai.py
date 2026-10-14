@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 import psycopg
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import Forbidden
 
 from crm_panel import TEHRAN
 
@@ -903,6 +904,17 @@ async def run_search_watch_once(application):
                 )
                 _mark_seen(subscription_id, int(row[0]), notified=True)
                 sent_any = True
+            except Forbidden as exc:
+                # The user blocked the bot or deleted their account; retrying every
+                # cycle only fails again. A new search re-enables notifications.
+                decline_search_subscription(subscription_id, telegram_user_id)
+                logging.warning(
+                    "Smart search subscription disabled: subscription=%s user=%s reason=%s",
+                    subscription_id,
+                    telegram_user_id,
+                    exc.message,
+                )
+                break
             except Exception:
                 logging.exception(
                     "Smart search notification failed subscription=%s user=%s property=%s",
