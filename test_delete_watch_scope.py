@@ -38,6 +38,13 @@ class DeleteWatchScopeTest(unittest.TestCase):
         self.assertEqual(ns['get_delete_watch_property_ids'](after_id=1, limit=1), [2])
         self.assertEqual(ns['get_delete_watch_property_ids'](after_id=2, limit=1), [1])
 
+    def test_no_age_window_on_listing_cleanup_or_categories(self):
+        # Deletion watchers and category sync must cover listings of any age;
+        # an 11-day window left older deleted listings visible indefinitely.
+        app = Path(__file__).parent / 'app'
+        for name in ('bot.py', 'crm_panel.py'):
+            self.assertNotIn("INTERVAL '11 days'", (app / name).read_text(encoding='utf-8'), name)
+
 
 if __name__ == '__main__':
     unittest.main()
