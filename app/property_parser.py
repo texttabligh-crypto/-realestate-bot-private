@@ -95,6 +95,39 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 
+# Some source channels pin one «catalog» post listing several units, each
+# starting with its own «کد فایل» line, and keep editing it. Parsing it as
+# one listing mixes every unit's parking, elevator and detail lines together.
+_LISTING_CODE_LINE = re.compile(
+    r"(?m)^[^\w\n]{0,8}کد\s*(?:فایل|واحد|ملک|آگهی)\s*[:：\-]?\s*(\d+)"
+)
+
+
+def split_listing_blocks(text: str):
+    """Return [(code, text)] per unit of a multi-listing post, else [].
+
+    Each block keeps the shared header (hashtags/title before the first
+    code), so a unit parses exactly as if it had been posted on its own.
+    """
+    text = normalize_text(text)
+    matches = list(_LISTING_CODE_LINE.finditer(text))
+    if len({match.group(1) for match in matches}) < 2:
+        return []
+
+    header = text[:matches[0].start()]
+    blocks = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        blocks.append((match.group(1), header + text[match.start():end].strip()))
+    return blocks
+
+
+def primary_listing_text(text: str) -> str:
+    """The first unit of a multi-listing post; any other text unchanged."""
+    blocks = split_listing_blocks(text)
+    return blocks[0][1] if blocks else text
+
+
 def first_number(patterns, text, cast=float):
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
@@ -1099,7 +1132,7 @@ def make_price_hashtag(price_billion):
 
 
 def parse_property(text: str) -> dict:
-    text = normalize_text(text)
+    text = normalize_text(primary_listing_text(text))
 
     price_billion = parse_price_billion(text)
 
@@ -1129,10 +1162,15 @@ def parse_property(text: str) -> dict:
 
 
 def parse_dynamic_attributes(text: str):
+    text = primary_listing_text(text or "")
     attributes = []
 
     normalized_text = normalize_text(
         text or ""
+    )
+    # Some channels bullet lines with large diamonds; read them like 🔹.
+    normalized_text = re.sub(
+        r"(?m)^[ \t]*[🔷🔶][ \t]*", "🔹 ", normalized_text
     )
 
     deed_match = re.search(
@@ -1390,6 +1428,15 @@ def parse_dynamic_attributes(text: str):
         r"([0-9۰-۹٠-٩]+)",
         normalized_text,
     )
+
+    if not units_match:
+        # «۵ واحد در طبقه» puts the number first.
+        units_match = re.search(
+            r"(?mi)^\s*"
+            r"(?:〽️|🔹|🔸|♦️|♦|▪️|▪|•|◾)?\s*"
+            r"([0-9]+)\s*واحد\s*در\s*(?:هر\s*)?طبقه\s*$",
+            normalized_text,
+        )
 
     if units_match:
         value = units_match.group(1)
@@ -2141,6 +2188,7 @@ def parse_rule_attributes(text: str, rules):
     Example rejected:
         ویو ابدی همیشه جزو گزینه‌های قابل توجه بازار هستن.
     """
+    text = primary_listing_text(text or "")
 
     normalized_text = normalize_text(text or "")
     attributes = []
