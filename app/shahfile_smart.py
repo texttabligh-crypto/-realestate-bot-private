@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -10,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 import psycopg
+from telegram.constants import ChatAction
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -1829,6 +1831,23 @@ async def _offer_search_confirmation(update, context, filters, query_text, custo
     )
 
 
+_typing_tasks = set()
+
+
+def _show_typing(update, context):
+    """Show «typing…» while the AI reads the message; never delays the reply."""
+    async def send():
+        try:
+            await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+        except Exception:
+            pass
+
+    # Keep a reference so the fire-and-forget task is not garbage-collected.
+    task = asyncio.create_task(send())
+    _typing_tasks.add(task)
+    task.add_done_callback(_typing_tasks.discard)
+
+
 async def handle_customer_text(update, context):
     if not update.effective_user or not update.message:
         return False
@@ -1860,6 +1879,7 @@ async def handle_customer_text(update, context):
         _abandon_local_flow(user.id, state, payload or {}, customer_id)
         state, payload = "IDLE", {}
 
+        _show_typing(update, context)
         override_intent = await extract_ai_intent(
             text,
             telegram_user_id=user.id,
@@ -1910,6 +1930,7 @@ async def handle_customer_text(update, context):
     if state not in SELLER_STATES and state not in {
         "VISIT_PHONE", "VISIT_DATETIME", "FINANCE_QUESTION", "SHOWCASE_PHONE"
     }:
+        _show_typing(update, context)
         ai_intent = await extract_ai_intent(
             text,
             telegram_user_id=user.id,
@@ -2066,6 +2087,7 @@ async def handle_customer_text(update, context):
         visit_at = parse_shamsi_visit_datetime(text)
         if not visit_at:
             # Natural Persian date phrases (e.g. «20 ام این ماه ساعت 19») are normalized by AI.
+            _show_typing(update, context)
             ai_visit = await extract_ai_intent(
                 text, telegram_user_id=user.id, pending_visit=True
             )
