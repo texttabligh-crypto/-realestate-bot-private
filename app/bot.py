@@ -7180,7 +7180,7 @@ def get_source_delete_watch_rows(limit=25):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT
+                SELECT
                     ps.id,
                     ps.property_id,
                     ps.source_message_id,
@@ -8917,7 +8917,11 @@ async def repair_extended_source_locations(application):
             )
         )
 
-        if not forced_address:
+        # Already applied on an earlier run; re-editing every post on each
+        # restart trips Telegram flood control for the whole bot.
+        if not forced_address or (
+            str(current_address or "").strip() == forced_address
+        ):
             continue
 
         save_property_address(
@@ -8985,6 +8989,7 @@ async def repair_extended_source_locations(application):
         ):
             best_candidates[int(property_id)] = {
                 "address": new_address_text,
+                "current": current_address_text,
                 "source_raw_text": source_raw_text,
                 "unit_code": unit_code_text,
             }
@@ -8995,9 +9000,12 @@ async def repair_extended_source_locations(application):
         source_raw_text = candidate["source_raw_text"]
         new_address_text = candidate["address"]
 
-        # Re-send even if the database already contains the precise
-        # address: a prior Telegram edit may have failed after DB save.
-        # Location-only repair must not modify unrelated attributes.
+        # Skip addresses an earlier run already applied: re-editing every
+        # post on each restart trips Telegram flood control for the whole
+        # bot. Location-only repair must not modify unrelated attributes.
+        if new_address_text == candidate["current"]:
+            continue
+
         try:
             save_property_address(
                 property_id,
@@ -11688,6 +11696,14 @@ async def refresh_published_property_post(
             logging.warning(
                 "Published property refresh timed out; "
                 "will retry later: property_id=%s",
+                property_id,
+            )
+            return False
+
+        if isinstance(exc, RetryAfter):
+            logging.warning(
+                "Published property refresh paused by Telegram flood "
+                "control; skipped this round: property_id=%s",
                 property_id,
             )
             return False
