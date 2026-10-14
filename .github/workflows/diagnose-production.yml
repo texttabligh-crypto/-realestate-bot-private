@@ -1,0 +1,83 @@
+name: Diagnose Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Which container logs to show"
+        type: choice
+        options: [all, bot, partner_hub, postgres, redis]
+        default: all
+      lines:
+        description: "Log lines per container (1-2000)"
+        type: string
+        default: "200"
+      since:
+        description: "Log window, e.g. 30m or 6h"
+        type: string
+        default: "60m"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: realestate-diagnostics
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    name: Read-only production diagnostics
+    runs-on: [self-hosted, Linux, X64, nimatmelk-production]
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          clean: true
+          persist-credentials: false
+
+      - name: Collect diagnostics
+        shell: bash
+        env:
+          SERVICE: ${{ inputs.service }}
+          LINES: ${{ inputs.lines }}
+          SINCE: ${{ inputs.since }}
+        run: |
+          set -o pipefail
+          report="${RUNNER_TEMP}/diagnose.txt"
+
+          if sudo -n -l /usr/local/sbin/diagnose-realestate-bot >/dev/null 2>&1; then
+            sudo -n /usr/local/sbin/diagnose-realestate-bot "$SERVICE" "$LINES" "$SINCE" | tee "$report"
+          elif docker info >/dev/null 2>&1; then
+            bash deploy/diagnose-realestate-bot "$SERVICE" "$LINES" "$SINCE" | tee "$report"
+          else
+            echo "::error::Runner cannot read Docker. Install deploy/diagnose-realestate-bot as /usr/local/sbin/diagnose-realestate-bot with a NOPASSWD sudoers rule (see README)."
+            exit 1
+          fi
+
+      - name: Compare server files with main
+        shell: bash
+        run: |
+          report="${RUNNER_TEMP}/diagnose.txt"
+          if ! grep -q '^DEPLOYED_FILE ' "$report"; then
+            echo "Server file hashes unavailable; skipped comparison."
+            exit 0
+          fi
+
+          grep '^DEPLOYED_FILE ' "$report" | awk '{print $2, $3}' > "${RUNNER_TEMP}/server.sha"
+          { find app partner_hub -type f -name '*.py' -not -path '*/__pycache__/*'; echo docker-compose.yml; } \
+            | LC_ALL=C sort | xargs sha256sum | awk '{print $1, $2}' > "${RUNNER_TEMP}/main.sha"
+
+          awk '
+            NR == FNR { server[$2] = $1; next }
+            !($2 in server) { print "::warning::Missing on server: " $2; drift = 1; next }
+            server[$2] != $1 { print "::warning::Differs from main: " $2; drift = 1 }
+            END { if (!drift) print "Server files match main." }
+          ' "${RUNNER_TEMP}/server.sha" "${RUNNER_TEMP}/main.sha"
+
+      - name: Remove local report
+        if: always()
+        shell: bash
+        run: rm -f "${RUNNER_TEMP}/diagnose.txt" "${RUNNER_TEMP}/server.sha" "${RUNNER_TEMP}/main.sha"

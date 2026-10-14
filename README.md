@@ -34,5 +34,20 @@ python3 smoke_test.py
 مسیر پروژه، اجرای تست سلامت و نگهداری مسیر Rollback. هیچ سرویس یا کانتینر
 نامرتبطی نباید متوقف، حذف یا با `--remove-orphans` پاک شود.
 
+## عیب‌یابی سرور (فقط‌خواندنی)
+
+workflow `Diagnose Production` روی runner سرور اجرا می‌شود و وضعیت کانتینرها،
+مصرف منابع، لاگ‌های اخیر و تطابق فایل‌های نصب‌شده با `main` را گزارش می‌کند.
+هیچ سرویسی را متوقف یا بازسازی نمی‌کند و `.env` را نمی‌خواند. توکن‌ها، رمزها و
+شماره موبایل‌ها پیش از ثبت در لاگ حذف می‌شوند.
+
+اگر کاربر runner به Docker دسترسی مستقیم ندارد، یک بار روی سرور با root نصب شود:
+
+```bash
+install -m 755 -o root -g root deploy/diagnose-realestate-bot /usr/local/sbin/diagnose-realestate-bot
+echo '<runner-user> ALL=(root) NOPASSWD: /usr/local/sbin/diagnose-realestate-bot' > /etc/sudoers.d/realestate-diagnose
+chmod 440 /etc/sudoers.d/realestate-diagnose && visudo -cf /etc/sudoers.d/realestate-diagnose
+```
+
 تنظیمات واقعی فقط در `.env` سرور نگهداری می‌شوند. برای فهرست متغیرهای لازم،
 از `.env.example` استفاده کنید.
