@@ -145,6 +145,7 @@ def first_number(patterns, text, cast=float):
 
 # «۱۴۳/۵» uses a slash as the decimal separator.
 _AREA_NUMBER = r"(\d+(?:[./]\d+)?)"
+_LOCATION_LINE = re.compile(r"📍|خیابان|کوچه|بلوار|میدان")
 
 
 def _area_value(value):
@@ -152,23 +153,18 @@ def _area_value(value):
 
 
 def parse_area(text: str):
-    # «N متر» and «متراژ N» are unambiguous. «N متری» is also how street names
-    # are written («ائل‌گلی | ۳۵ متری سینا»), so it is only a fallback and is
-    # never read from a location line.
-    for pattern in (
-        _AREA_NUMBER + r"\s*متر(?!ی)",
-        r"متراژ\s*[:：\-]?\s*" + _AREA_NUMBER,
-    ):
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if match:
+    # The first «N متر/متری» is the size, except that on a location line
+    # «N متری» names a street («📍 ائل‌گلی | ۳۵ متری سینا»).
+    for line in (text or "").splitlines():
+        is_location = _LOCATION_LINE.search(line)
+        for match in re.finditer(_AREA_NUMBER + r"\s*متر(ی)?", line):
+            if is_location and match.group(2):
+                continue
             return _area_value(match.group(1))
 
-    for line in text.splitlines():
-        if "📍" in line or re.search(r"خیابان|کوچه|بلوار|میدان", line):
-            continue
-        match = re.search(_AREA_NUMBER + r"\s*متری", line)
-        if match:
-            return _area_value(match.group(1))
+    match = re.search(r"متراژ\s*[:：\-]?\s*" + _AREA_NUMBER, text or "")
+    if match:
+        return _area_value(match.group(1))
 
     return None
 
