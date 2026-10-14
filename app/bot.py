@@ -7582,6 +7582,9 @@ def start_source_deleted_posts_watcher(
 
 DELETE_WATCH_INTERVAL_SECONDS = 300
 DELETE_WATCH_BATCH_SIZE = 25
+# Each check edits a channel post; spacing them keeps the batch under
+# Telegram's per-chat limit so category and publish edits are not throttled.
+DELETE_WATCH_EDIT_SPACING_SECONDS = 3.0
 
 
 def get_delete_watch_property_ids(
@@ -7678,6 +7681,8 @@ async def run_deleted_posts_watch_tick(
                 "property_id=%s",
                 property_id,
             )
+
+        await asyncio.sleep(DELETE_WATCH_EDIT_SPACING_SECONDS)
 
     application.bot_data[
         "delete_watch_last_property_id"
@@ -11117,6 +11122,7 @@ async def sync_active_category_posts(
 
     synced = 0
     removed = 0
+    paused = False
 
     for category_row in category_rows:
         (
@@ -11228,6 +11234,7 @@ async def sync_active_category_posts(
                     "category_post_id=%s",
                     category_post_id,
                 )
+                paused = True
                 break
 
             elif (
@@ -11297,6 +11304,7 @@ async def sync_active_category_posts(
     return {
         "synced": synced,
         "removed": removed,
+        "paused": paused,
     }
 
 
@@ -16094,7 +16102,9 @@ async def sync_active_category_posts(bot):
     )
 
     try:
-        await sync_region_category_posts(bot)
+        region_result = await sync_region_category_posts(bot)
+        if region_result and region_result.get("paused"):
+            result["paused"] = True
 
     except Exception:
         logging.exception(
@@ -16104,8 +16114,10 @@ async def sync_active_category_posts(bot):
     return result
 
 
-CATEGORY_RECONCILE_STARTUP_DELAY_SECONDS = 300
+# Off the 300s cadence of the post watchers so their edits do not collide.
+CATEGORY_RECONCILE_STARTUP_DELAY_SECONDS = 150
 CATEGORY_RECONCILE_INTERVAL_SECONDS = 6 * 3600
+CATEGORY_RECONCILE_RETRY_SECONDS = 15 * 60
 
 
 async def category_reconcile_loop(application):
@@ -16115,19 +16127,26 @@ async def category_reconcile_loop(application):
     # rewrites every active category post from the database.
     await asyncio.sleep(CATEGORY_RECONCILE_STARTUP_DELAY_SECONDS)
     while True:
+        delay = CATEGORY_RECONCILE_INTERVAL_SECONDS
         try:
             async with _category_sync_lock:
                 result = await sync_active_category_posts(application.bot)
+            paused = bool(result.get("paused"))
             logging.info(
-                "CATEGORY full reconcile completed: synced=%s removed=%s",
+                "CATEGORY full reconcile completed: synced=%s removed=%s paused=%s",
                 result.get("synced", 0),
                 result.get("removed", 0),
+                paused,
             )
+            # Flood control cut the pass short; finish it soon, not in 6 hours.
+            if paused:
+                delay = CATEGORY_RECONCILE_RETRY_SECONDS
         except asyncio.CancelledError:
             raise
         except Exception:
             logging.exception("CATEGORY full reconcile failed")
-        await asyncio.sleep(CATEGORY_RECONCILE_INTERVAL_SECONDS)
+            delay = CATEGORY_RECONCILE_RETRY_SECONDS
+        await asyncio.sleep(delay)
 
 
 def start_category_reconcile(application):

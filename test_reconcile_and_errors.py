@@ -25,9 +25,13 @@ class StopLoop(Exception):
 
 
 class CategoryReconcileTest(unittest.TestCase):
-    def test_runs_full_sync_under_lock_and_survives_errors(self):
+    def test_runs_full_sync_under_lock_and_retries_soon_after_failures(self):
         calls, sleeps = [], []
-        results = [RuntimeError("telegram down"), {"synced": 4, "removed": 1}]
+        results = [
+            RuntimeError("telegram down"),
+            {"synced": 1, "removed": 0, "paused": True},
+            {"synced": 4, "removed": 1, "paused": False},
+        ]
 
         async def sync(bot):
             calls.append(bot)
@@ -38,7 +42,7 @@ class CategoryReconcileTest(unittest.TestCase):
 
         async def fake_sleep(seconds):
             sleeps.append(seconds)
-            if len(sleeps) > 2:
+            if len(sleeps) > 3:
                 raise StopLoop
 
         ns = load("bot.py", {"category_reconcile_loop"}, {
@@ -46,16 +50,18 @@ class CategoryReconcileTest(unittest.TestCase):
             "logging": logging,
             "_category_sync_lock": asyncio.Lock(),
             "sync_active_category_posts": sync,
-            "CATEGORY_RECONCILE_STARTUP_DELAY_SECONDS": 300,
+            "CATEGORY_RECONCILE_STARTUP_DELAY_SECONDS": 150,
             "CATEGORY_RECONCILE_INTERVAL_SECONDS": 21600,
+            "CATEGORY_RECONCILE_RETRY_SECONDS": 900,
         })
         app = type("App", (), {"bot": "bot"})()
         with self.assertLogs(level=logging.INFO) as logs, self.assertRaises(StopLoop):
             asyncio.run(ns["category_reconcile_loop"](app))
-        self.assertEqual(calls, ["bot", "bot"])
-        self.assertEqual(sleeps, [300, 21600, 21600])
+        self.assertEqual(calls, ["bot", "bot", "bot"])
+        # error -> retry soon, flood-control pause -> retry soon, complete -> 6 hours
+        self.assertEqual(sleeps, [150, 900, 900, 21600])
         self.assertTrue(any("full reconcile failed" in line for line in logs.output))
-        self.assertTrue(any("synced=4 removed=1" in line for line in logs.output))
+        self.assertTrue(any("synced=4 removed=1 paused=False" in line for line in logs.output))
 
 
 @unittest.skipIf(BadRequest is None, "python-telegram-bot not installed")

@@ -1,5 +1,7 @@
 """Every active published property must be checked for channel deletion, not only recent ones."""
 import ast
+import asyncio
+import logging
 import sqlite3
 import unittest
 from pathlib import Path
@@ -44,6 +46,32 @@ class DeleteWatchScopeTest(unittest.TestCase):
         app = Path(__file__).parent / 'app'
         for name in ('bot.py', 'crm_panel.py'):
             self.assertNotIn("INTERVAL '11 days'", (app / name).read_text(encoding='utf-8'), name)
+
+    def test_watcher_spaces_out_channel_edits(self):
+        events = []
+
+        async def refresh(bot, property_id):
+            events.append(('edit', property_id))
+
+        async def fake_sleep(seconds):
+            events.append(('sleep', seconds))
+
+        source = Path(__file__).parent.joinpath('app/bot.py').read_text(encoding='utf-8')
+        node = next(n for n in ast.parse(source).body
+                    if isinstance(n, ast.AsyncFunctionDef) and n.name == 'run_deleted_posts_watch_tick')
+        ns = {
+            'asyncio': type('A', (), {'sleep': staticmethod(fake_sleep)}),
+            'logging': logging,
+            'get_delete_watch_property_ids': lambda **kwargs: [7, 8],
+            'refresh_published_property_post': refresh,
+            'DELETE_WATCH_BATCH_SIZE': 25,
+            'DELETE_WATCH_EDIT_SPACING_SECONDS': 3.0,
+        }
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'bot.py', 'exec'), ns)
+        app = type('App', (), {'bot': None, 'bot_data': {}})()
+        asyncio.run(ns['run_deleted_posts_watch_tick'](app))
+        self.assertEqual(events, [('edit', 7), ('sleep', 3.0), ('edit', 8), ('sleep', 3.0)])
+        self.assertEqual(app.bot_data['delete_watch_last_property_id'], 8)
 
 
 if __name__ == '__main__':
