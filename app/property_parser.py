@@ -1176,6 +1176,27 @@ def parse_property(text: str) -> dict:
     }
 
 
+# Messenger / social labels a source uses to advertise its own channel.
+PROMOTIONAL_LABELS = {
+    "بله", "ایتا", "روبیکا", "سروش", "واتساپ", "واتس اپ", "واتس‌اپ",
+    "اینستاگرام", "اینستا", "تلگرام", "آیدی", "آیدی تلگرام", "لینک",
+    "پیج", "سایت", "وب سایت", "وبسایت", "کانال", "کانال تلگرام", "گروه",
+}
+PROMOTIONAL_LINK_PATTERN = (
+    r"https?://|www\.|t\.me/|ble\.ir|eitaa\.com|rubika\.ir|wa\.me|instagram\.com"
+    r"|@[A-Za-z0-9_]{4,}"
+)
+_PROMOTIONAL_LINK = re.compile(PROMOTIONAL_LINK_PATTERN, re.IGNORECASE)
+
+
+def is_promotional_attribute(label, value):
+    label = re.sub(r"^[^0-9A-Za-zآ-ی]+", "", str(label or "")).strip()
+    return (
+        label in PROMOTIONAL_LABELS
+        or bool(_PROMOTIONAL_LINK.search(f"{label} {value or ''}"))
+    )
+
+
 def parse_dynamic_attributes(text: str):
     text = primary_listing_text(text or "")
     attributes = []
@@ -2179,7 +2200,15 @@ def parse_dynamic_attributes(text: str):
         source_detail_order += 1
 
 
-    return attributes
+    # Never republish a source's own channels, links or contact handles.
+    return [
+        item
+        for item in attributes
+        if not is_promotional_attribute(
+            item.get("attribute_label"),
+            item.get("attribute_value"),
+        )
+    ]
 
 
 def parse_rule_attributes(text: str, rules):
