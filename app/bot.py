@@ -18,7 +18,7 @@ from telegram.error import BadRequest, RetryAfter, TimedOut
 
 from composite_search import composite_text_predicates
 from property_filter import classify_property
-from property_parser import parse_property, parse_dynamic_attributes, parse_rule_attributes, parse_source_unit_code
+from property_parser import parse_property, parse_dynamic_attributes, parse_rule_attributes, parse_source_unit_code, split_listing_blocks
 from publisher import get_property_for_publish, build_publish_text, publish_property, get_property_media, republish_property, get_destination_channel
 
 from scheduler import (
@@ -8699,10 +8699,12 @@ async def repair_explicit_source_feature_mismatches(application):
             property_raw_text,
             *(source_raw_texts or []),
         ]
+        # A multi-listing text describes several units, so its «ندارد»
+        # may belong to another unit; only single-listing texts count.
         parsed_candidates = [
             parse_property(text)
             for text in candidate_texts
-            if text
+            if text and not split_listing_blocks(text)
         ]
         missing_features = set()
 
@@ -10904,6 +10906,45 @@ def find_property_for_source_sync(
             return None
 
 
+def get_source_unit_code_for_message(
+    telegram_channel_id,
+    source_message_id,
+):
+    """The unit code recorded for this source message when it was ingested."""
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ps.source_unit_code
+                FROM property_sources ps
+                JOIN channels c
+                  ON c.id = ps.source_channel_id
+                WHERE c.telegram_channel_id = %s
+                  AND ps.source_message_id = %s
+                  AND ps.is_active = TRUE
+                ORDER BY ps.is_primary DESC, ps.id DESC
+                LIMIT 1
+                """,
+                (telegram_channel_id, source_message_id),
+            )
+            row = cur.fetchone()
+    return str(row[0]).strip() if row and row[0] else None
+
+
+def clear_source_detail_attributes(property_id):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM property_attributes
+                WHERE property_id = %s
+                  AND attribute_key LIKE 'source_detail_%%'
+                """,
+                (property_id,),
+            )
+        conn.commit()
+
+
 def replace_category_post_items(
     category_post_id,
     rows,
@@ -11834,6 +11875,32 @@ async def sync_edited_source_post(
         )
         return False
 
+    # A pinned multi-listing post is edited as units come and go. Apply only
+    # this property's own unit block; the whole text would mix every unit's
+    # facilities and details into one listing (and «sold» for any unit).
+    catalog_blocks = split_listing_blocks(raw_text)
+    if catalog_blocks:
+        stored_code = get_source_unit_code_for_message(
+            post.chat.id,
+            post.message_id,
+        )
+        own_block = next(
+            (block for code, block in catalog_blocks if code == stored_code),
+            None,
+        )
+        if own_block is None:
+            logging.warning(
+                "Edited SOURCE catalog no longer lists this unit; skipped: "
+                "property_id=%s message=%s source_code=%s catalog_codes=%s",
+                property_id,
+                post.message_id,
+                stored_code,
+                [code for code, _block in catalog_blocks],
+            )
+            return False
+        raw_text = own_block
+        source_unit_code = stored_code
+
     if source_text_is_sold(raw_text):
         mark_property_sold(
             property_id
@@ -11928,6 +11995,11 @@ async def sync_edited_source_post(
         merged_attributes[
             item["attribute_key"]
         ] = item
+
+    # Detail lines saved from earlier catalog versions may belong to other
+    # units; rebuild them from this unit's block only.
+    if catalog_blocks:
+        clear_source_detail_attributes(property_id)
 
     save_property_attributes(
         property_id,
