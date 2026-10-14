@@ -18,7 +18,7 @@ from telegram.error import BadRequest, RetryAfter, TimedOut
 
 from composite_search import composite_text_predicates
 from property_filter import classify_property
-from property_parser import normalize_text, parse_property, parse_dynamic_attributes, parse_rule_attributes, parse_source_unit_code, split_listing_blocks
+from property_parser import is_promotional_attribute, normalize_text, parse_property, parse_dynamic_attributes, parse_rule_attributes, parse_source_unit_code, split_listing_blocks
 from publisher import get_property_for_publish, build_publish_text, publish_property, get_property_media, republish_property, get_destination_channel
 
 from scheduler import (
@@ -9227,6 +9227,84 @@ def start_misparsed_area_repair(application):
     return task
 
 
+# === PROMOTIONAL DETAIL CLEANUP V1 ===
+PROMO_CLEANUP_STARTUP_DELAY_SECONDS = 90
+
+
+def _auto_detail_attribute_rows():
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT property_id, attribute_key, attribute_label, attribute_value
+                FROM property_attributes
+                WHERE attribute_key LIKE 'generic_%'
+                   OR attribute_key LIKE 'source_detail_%'
+                   OR attribute_key = 'property_description'
+                """
+            )
+            return cur.fetchall()
+
+
+def _delete_attributes(keys):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            for property_id, attribute_key in keys:
+                cur.execute(
+                    "DELETE FROM property_attributes WHERE property_id = %s AND attribute_key = %s",
+                    (property_id, attribute_key),
+                )
+        conn.commit()
+
+
+async def remove_promotional_details(application):
+    # Older parses copied source contact lines such as «بله: https://ble.ir/…»
+    # into listings; the parser drops them now, this clears the saved ones.
+    promotional = [
+        (property_id, attribute_key)
+        for property_id, attribute_key, label, value in _auto_detail_attribute_rows()
+        if is_promotional_attribute(label, value)
+    ]
+    if promotional:
+        _delete_attributes(promotional)
+
+    property_ids = sorted({property_id for property_id, _key in promotional})
+    for property_id in property_ids:
+        try:
+            await refresh_published_property_post(application.bot, property_id)
+        except Exception:
+            logging.exception("Promotional detail cleanup refresh failed: property_id=%s", property_id)
+        await asyncio.sleep(AREA_REPAIR_EDIT_SPACING_SECONDS)
+
+    logging.info(
+        "PROMO detail cleanup completed: removed=%s property_ids=%s",
+        len(promotional),
+        property_ids,
+    )
+
+
+async def delayed_promotional_detail_cleanup(application):
+    await asyncio.sleep(PROMO_CLEANUP_STARTUP_DELAY_SECONDS)
+    try:
+        await remove_promotional_details(application)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.exception("Promotional detail cleanup failed")
+
+
+def start_promotional_detail_cleanup(application):
+    existing = application.bot_data.get("promotional_detail_cleanup_task")
+    if existing and not existing.done():
+        return existing
+    task = asyncio.create_task(
+        delayed_promotional_detail_cleanup(application),
+        name="promotional_detail_cleanup",
+    )
+    application.bot_data["promotional_detail_cleanup_task"] = task
+    return task
+
+
 def start_extended_source_location_repair(application):
     existing = application.bot_data.get(
         "extended_source_location_repair_task"
@@ -9353,6 +9431,7 @@ async def post_init(application):
     start_explicit_source_feature_repair(application)
     start_extended_source_location_repair(application)
     start_misparsed_area_repair(application)
+    start_promotional_detail_cleanup(application)
     start_category_reconcile(application)
 
     # Let startup workers emit their immediate errors first, then place
