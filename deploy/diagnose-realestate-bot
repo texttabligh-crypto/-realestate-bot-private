@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Read-only production diagnostics for the real-estate bot.
+# Never restarts, stops, edits or prints .env; only inspects realestate_* containers.
+set -Euo pipefail
+umask 077
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C.UTF-8
+
+TARGET="/opt/realestate-bot"
+ALL_CONTAINERS=(realestate_bot realestate_partner_hub realestate_postgres realestate_redis)
+
+SERVICE="${1:-all}"
+LINES="${2:-200}"
+SINCE="${3:-60m}"
+
+case "${SERVICE}" in
+    all) LOG_CONTAINERS=(realestate_bot realestate_partner_hub) ;;
+    bot) LOG_CONTAINERS=(realestate_bot) ;;
+    partner_hub) LOG_CONTAINERS=(realestate_partner_hub) ;;
+    postgres) LOG_CONTAINERS=(realestate_postgres) ;;
+    redis) LOG_CONTAINERS=(realestate_redis) ;;
+    *) echo "ERROR: service must be one of: all bot partner_hub postgres redis"; exit 2 ;;
+esac
+
+if ! [[ "${LINES}" =~ ^[0-9]{1,4}$ ]] || (( LINES < 1 || LINES > 2000 )); then
+    echo "ERROR: lines must be between 1 and 2000"
+    exit 2
+fi
+
+if ! [[ "${SINCE}" =~ ^[0-9]{1,4}[mh]$ ]]; then
+    echo "ERROR: since must look like 30m or 6h"
+    exit 2
+fi
+
+# Strip secrets and customer phone numbers before anything reaches the Actions log.
+# The phone rule runs twice so back-to-back numbers sharing one separator are both caught.
+redact() {
+    sed -E \
+        -e 's#(api\.telegram\.org/bot)[^/[:space:]]+#\1<redacted>#Ig' \
+        -e 's#[0-9]{6,}:[A-Za-z0-9_-]{30,}#<redacted-token>#g' \
+        -e 's#sk-[A-Za-z0-9_-]{16,}#<redacted-key>#g' \
+        -e 's#([a-z][a-z0-9+.-]*://)[^/@[:space:]]+@#\1<redacted>@#Ig' \
+        -e 's#((password|passwd|secret|token|api_key|apikey)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?)[^[:space:]"'"'"',}]+#\1<redacted>#Ig' \
+        -e 's#(^|[^0-9])(\+98|0098|0)9[0-9]{9}([^0-9]|$)#\1<phone>\3#g' \
+        -e 's#(^|[^0-9])(\+98|0098|0)9[0-9]{9}([^0-9]|$)#\1<phone>\3#g' \
+        -e 's#(۰|\+۹۸)۹[۰۱۲۳۴۵۶۷۸۹]{9}#<phone>#g'
+}
+
+section() {
+    printf '\n========== %s ==========\n' "$1"
+}
+
+section "SYSTEM"
+date -u '+time_utc=%Y-%m-%dT%H:%M:%SZ'
+uptime || true
+df -h / "${TARGET}" 2>/dev/null || df -h / || true
+free -m || true
+
+section "CONTAINERS"
+for container in "${ALL_CONTAINERS[@]}"; do
+    docker inspect -f \
+        '{{.Name}} status={{.State.Status}} restarts={{.RestartCount}} started={{.State.StartedAt}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}} exit_code={{.State.ExitCode}}' \
+        "${container}" 2>&1 || echo "/${container} status=missing"
+done
+
+section "RESOURCES"
+docker stats --no-stream \
+    --format '{{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}} mem_pct={{.MemPerc}}' \
+    "${ALL_CONTAINERS[@]}" 2>&1 || true
+
+section "DEPLOYED FILES"
+if cd "${TARGET}" 2>/dev/null; then
+    find app partner_hub -type f -name '*.py' -not -path '*/__pycache__/*' 2>/dev/null \
+        | LC_ALL=C sort \
+        | xargs -r sha256sum 2>/dev/null \
+        | sed 's/^/DEPLOYED_FILE /' || true
+    if test -f docker-compose.yml; then
+        sha256sum docker-compose.yml | sed 's/^/DEPLOYED_FILE /'
+    fi
+    echo "latest_backups:"
+    ls -1t "${TARGET}/backups" 2>/dev/null | head -n 3 || true
+    cd - >/dev/null || true
+else
+    echo "NOTE: ${TARGET} is not readable by this user; skipped file checks"
+fi
+
+for container in "${LOG_CONTAINERS[@]}"; do
+    section "ERROR SUMMARY ${container} (since ${SINCE})"
+    errors="$(docker logs --since "${SINCE}" "${container}" 2>&1 \
+        | grep -E 'ERROR|CRITICAL|Traceback|Exception' | redact || true)"
+    if test -n "${errors}"; then
+        printf 'count=%s\n' "$(printf '%s\n' "${errors}" | wc -l)"
+        printf '%s\n' "${errors}" | tail -n 30
+    else
+        echo "count=0"
+    fi
+
+    section "LOGS ${container} (since ${SINCE}, last ${LINES} lines)"
+    docker logs --since "${SINCE}" --tail "${LINES}" "${container}" 2>&1 | redact || true
+done
+
+section "DONE"
+echo "DIAGNOSE_COMPLETE"

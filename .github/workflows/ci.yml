@@ -19,6 +19,8 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q app partner_hub
       - name: Validate deployment wrapper
-        run: bash -n deploy/deploy-realestate-bot
+        run: |
+          bash -n deploy/deploy-realestate-bot
+          bash -n deploy/diagnose-realestate-bot
       - name: Run project smoke test
         run: python smoke_test.py
