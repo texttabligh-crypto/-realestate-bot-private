@@ -1173,6 +1173,7 @@ async def sync_region_category_posts(
                 ORDER BY id
             """)
             posts = cur.fetchall()
+    paused = False
 
     if region_names is not None:
         wanted = {
@@ -1233,7 +1234,9 @@ async def sync_region_category_posts(
                     "Region category sync batch paused after Telegram flood control: post_id=%s",
                     post_id,
                 )
+                paused = True
                 break
+    return {"paused": paused}
 
 async def handle_crm_button(update, context, session):
     query = update.callback_query
