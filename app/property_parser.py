@@ -130,6 +130,16 @@ def split_listing_blocks(text: str):
     return blocks if listings >= 2 else []
 
 
+# Some channels list a unit's features on one line, separated by ✨:
+# «مشخصات ملک ✨ کد واحد: … ✨ 180 متر ✨ طبقه 6 از 7 ✨ …». Give each feature
+# its own line so it is read, and published, as its own feature.
+_INLINE_FEATURE_SEPARATOR = re.compile(r"(?<=\S)(?:[ \t]*✨\ufe0f?)+[ \t]*(?=\S)")
+
+
+def split_inline_features(text: str) -> str:
+    return _INLINE_FEATURE_SEPARATOR.sub("\n✨ ", text or "")
+
+
 def primary_listing_text(text: str) -> str:
     """The first unit of a multi-listing post; any other text unchanged."""
     blocks = split_listing_blocks(text)
@@ -1155,7 +1165,10 @@ def make_price_hashtag(price_billion):
 
 
 def parse_property(text: str) -> dict:
-    text = normalize_text(primary_listing_text(text))
+    location_text = normalize_text(primary_listing_text(text))
+    # Location fallbacks read short lines, so a split-out feature such as
+    # «✨ جنوبی» must not be taken for the address.
+    text = split_inline_features(location_text)
 
     price_billion = parse_price_billion(text)
 
@@ -1164,8 +1177,8 @@ def parse_property(text: str) -> dict:
         "bedrooms": parse_bedrooms(text),
         "floor_text": parse_floor(text),
         "build_year": parse_build_year(text),
-        "district": parse_district(text),
-        "address_text": parse_address_text(text),
+        "district": parse_district(location_text),
+        "address_text": parse_address_text(location_text),
         "has_parking": parse_boolean_feature(text, "پارکینگ"),
         "has_elevator": parse_boolean_feature(text, "آسانسور"),
         "has_storage": parse_boolean_feature(text, "انباری"),
@@ -1209,9 +1222,9 @@ def parse_dynamic_attributes(text: str):
     text = primary_listing_text(text or "")
     attributes = []
 
-    normalized_text = normalize_text(
+    normalized_text = split_inline_features(normalize_text(
         text or ""
-    )
+    ))
     # Some channels bullet lines with large diamonds; read them like 🔹.
     normalized_text = re.sub(
         r"(?m)^[ \t]*[🔷🔶][ \t]*", "🔹 ", normalized_text
@@ -1466,7 +1479,7 @@ def parse_dynamic_attributes(text: str):
 
     units_match = re.search(
         r"(?mi)^\s*"
-        r"(?:〽️|🔹|🔸|♦️|♦|▪️|▪|•|◾)?\s*"
+        r"(?:✨️?|〽️|🔹|🔸|♦️|♦|▪️|▪|•|◾)?\s*"
         r"تعداد\s*واحد\s*در\s*طبقه"
         r"\s*[:：\-]?\s*"
         r"([0-9۰-۹٠-٩]+)",
@@ -1474,16 +1487,17 @@ def parse_dynamic_attributes(text: str):
     )
 
     if not units_match:
-        # «۵ واحد در طبقه» puts the number first.
+        # «۵ واحد در طبقه» puts the number first; «هر طبقه ۲ واحد» too.
         units_match = re.search(
             r"(?mi)^\s*"
-            r"(?:〽️|🔹|🔸|♦️|♦|▪️|▪|•|◾)?\s*"
-            r"([0-9]+)\s*واحد\s*در\s*(?:هر\s*)?طبقه\s*$",
+            r"(?:✨️?|〽️|🔹|🔸|♦️|♦|▪️|▪|•|◾)?\s*"
+            r"(?:([0-9]+)\s*واحد\s*در\s*(?:هر\s*)?طبقه"
+            r"|هر\s*طبقه\s*([0-9]+)\s*واحد)\s*$",
             normalized_text,
         )
 
     if units_match:
-        value = units_match.group(1)
+        value = next(group for group in units_match.groups() if group)
 
         value = value.translate(
             str.maketrans(
