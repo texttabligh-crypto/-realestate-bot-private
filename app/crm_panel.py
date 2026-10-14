@@ -1170,8 +1170,6 @@ async def sync_region_category_posts(
                        telegram_channel_id, telegram_message_id
                 FROM region_category_posts
                 WHERE is_active = TRUE
-                  AND COALESCE(updated_at, created_at)
-                      >= NOW() - INTERVAL '11 days'
                 ORDER BY id
             """)
             posts = cur.fetchall()
@@ -1218,7 +1216,17 @@ async def sync_region_category_posts(
             )
             await asyncio.sleep(2.0)
         except Exception as exc:
-            if "message is not modified" not in str(exc).lower():
+            error_text = str(exc).lower()
+            if "message to edit not found" in error_text or "message to be edited not found" in error_text:
+                # The region post was removed from the channel; stop syncing it,
+                # matching how price category posts are deactivated.
+                with db_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("UPDATE region_category_posts SET is_active=FALSE, updated_at=NOW() WHERE id=%s", (post_id,))
+                    conn.commit()
+                logging.warning("Region category post deactivated because its message is gone: post_id=%s", post_id)
+                continue
+            if "message is not modified" not in error_text:
                 logging.warning("Region category sync failed post_id=%s: %s", post_id, exc)
             if isinstance(exc, RetryAfter):
                 logging.warning(

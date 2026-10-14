@@ -7194,8 +7194,6 @@ def get_source_delete_watch_rows(limit=25):
                 WHERE ps.is_active = TRUE
                   AND c.channel_type = 'SOURCE'
                   AND c.is_active = TRUE
-                  AND COALESCE(p.published_at, p.created_at)
-                      >= NOW() - INTERVAL '11 days'
                   AND c.username IS NOT NULL
                   AND BTRIM(c.username) <> ''
                   AND ps.source_message_id IS NOT NULL
@@ -11095,8 +11093,6 @@ async def sync_active_category_posts(
                     telegram_message_id
                 FROM category_posts
                 WHERE is_active = TRUE
-                  AND COALESCE(updated_at, created_at)
-                      >= NOW() - INTERVAL '11 days'
                 ORDER BY id
                 """
             )
@@ -15844,8 +15840,6 @@ def _get_affected_price_category_ids(
                     max_price_billion
                 FROM category_posts
                 WHERE is_active = TRUE
-                  AND COALESCE(updated_at, created_at)
-                      >= NOW() - INTERVAL '11 days'
                 ORDER BY id
                 """
             )
@@ -15887,8 +15881,6 @@ def _get_property_region_category_names(
                 JOIN properties p
                   ON p.id = %s
                 WHERE r.is_active = TRUE
-                  AND COALESCE(r.updated_at, r.created_at)
-                      >= NOW() - INTERVAL '11 days'
                   AND (
                     COALESCE(
                         p.district,
