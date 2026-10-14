@@ -8,7 +8,7 @@ import re
 import urllib.error
 import urllib.request
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from typing import Any, Optional
 
 import psycopg
@@ -159,6 +159,7 @@ def normalize_search_filters(raw: Optional[dict]):
     numeric_specs = {
         "price_min_billion": (False, 0, 1000000),
         "price_max_billion": (False, 0, 1000000),
+        "price_target_billion": (False, 0, 1000000),
         "area_min": (False, 1, 100000),
         "area_max": (False, 1, 100000),
         "bedrooms": (True, 0, 100),
@@ -212,6 +213,64 @@ def normalize_search_filters(raw: Optional[dict]):
         out["direction"] = direction
 
     return out
+
+
+# «در حد ۴۰ میلیارد» or «واحد ۴۰ میلیاردی» asks for homes around 40, not for
+# everything up to 40 (which listed the cheapest 10-billion files first).
+PRICE_BAND_RATIO = Decimal("0.15")
+_PRICE_NUMBER = r"(\d+(?:\.\d+)?)\s*(میلیارد|ملیارد|میلیون|ملیون)"
+_APPROX_PRICE = re.compile(
+    r"(?:در\s*حد(?:ود)?|حدود(?:ا|اً|ی)?|حدوداً|(?:تو|در)\s*مایه(?:\s*|\u200c)?(?:ی|های)?|"
+    r"دور\s*و\s*بر(?:ِ)?|حول\s*و\s*حوش(?:ِ)?|نزدیک(?:\s*به)?|تقریبا|تقریباً|اطراف)\s*"
+    + _PRICE_NUMBER
+)
+_PRICE_ADJECTIVE = re.compile(_PRICE_NUMBER + r"ی(?:ه)?(?![\w\u200c])")
+# «تا حدود ۴۰» or «زیر ۴۰ میلیاردی» still sets a limit, not a target, and
+# «۴۰ میلیاردی تا ۵۰» is a range.
+_PRICE_LIMIT_BEFORE = re.compile(
+    r"(?<![\w\u200c])(?:تا|زیر|کمتر(?:\s*از)?|حداکثر|سقف|بالای|بیشتر(?:\s*از)?|حداقل|از|بین)\s*$"
+)
+_PRICE_RANGE_AFTER = re.compile(r"^\s*(?:تا|الی|-|–)\s*\d")
+
+
+def approximate_price_billion(text):
+    """The price a customer asks to be *around*, in billion toman, or None."""
+    raw = normalize_digits(text).replace("٫", ".").replace("/", ".")
+    raw = re.sub(r"(?<=\d)[,٬](?=\d{3})", "", raw)
+    for pattern in (_APPROX_PRICE, _PRICE_ADJECTIVE):
+        for match in pattern.finditer(raw):
+            if _PRICE_LIMIT_BEFORE.search(raw[: match.start()]):
+                continue
+            if _PRICE_RANGE_AFTER.search(raw[match.end():]):
+                continue
+            value = Decimal(match.group(1))
+            if match.group(2) in ("میلیون", "ملیون"):
+                value = value / 1000
+            if value > 0:
+                return float(value)
+    return None
+
+
+def price_band(target):
+    target = Decimal(str(target))
+    low = (target * (1 - PRICE_BAND_RATIO)).quantize(Decimal("0.1"), rounding=ROUND_FLOOR)
+    high = (target * (1 + PRICE_BAND_RATIO)).quantize(Decimal("0.1"), rounding=ROUND_CEILING)
+    return float(low), float(high)
+
+
+def apply_price_target(filters, text):
+    """Turn «around X» into a band around X whose closest homes come first."""
+    target = approximate_price_billion(text)
+    if target is None:
+        return normalize_search_filters(filters)
+    out = dict(filters or {})
+    low = out.get("price_min_billion")
+    high = out.get("price_max_billion")
+    # Keep a sensible band the AI already built around the target.
+    if not (low is not None and high is not None and 0 < low < target < high):
+        out["price_min_billion"], out["price_max_billion"] = price_band(target)
+    out["price_target_billion"] = target
+    return normalize_search_filters(out)
 
 
 def _filters_to_context(filters):
@@ -293,6 +352,7 @@ Rules:
 - Persian/Arabic/English digits may appear.
 - Price numbers such as 5 to 6 in a property-shopping context normally mean billion tomans.
 - "70 تا 90 متر" means area_min=70 and area_max=90, not price.
+- An approximate budget such as "در حد 40 میلیارد", "حدود 40", "تو مایه‌های 40", "دور و بر 40" or "واحد 40 میلیاردی" means AROUND that price, never only a maximum: set price_min_billion about 15% below and price_max_billion about 15% above it (40 -> 34 and 46).
 - Extract bedrooms and neighborhood/district when explicitly expressed.
 - Boolean amenities and deed_required are true/false only when explicitly requested.
 - Extract direction only when the user means the property's orientation, not when it is part of a neighborhood name.
@@ -367,6 +427,8 @@ Rules:
         intent = "unknown"
 
     filters = normalize_search_filters(parsed)
+    if intent == "search_property":
+        filters = apply_price_target(filters, text)
     unit_code = re.sub(r"\D", "", normalize_digits(parsed.get("unit_code") or "")) or None
     visit_dt = normalize_digits(parsed.get("visit_datetime_jalali") or "").strip() or None
     return {
@@ -481,8 +543,21 @@ def search_count(filters):
             return int(cur.fetchone()[0] or 0)
 
 
+def _search_order(filters):
+    """Closest to the customer's price first, not always the cheapest."""
+    filters = normalize_search_filters(filters)
+    target = filters.get("price_target_billion")
+    if target is not None:
+        return "ABS(p.current_price_billion - %s) ASC NULLS LAST, p.id DESC", [target]
+    if filters.get("price_max_billion") is not None and not filters.get("price_min_billion"):
+        # «تا ۴۰ میلیارد»: the homes nearest the budget are the relevant ones.
+        return "p.current_price_billion DESC NULLS LAST, p.id DESC", []
+    return "p.current_price_billion ASC NULLS LAST, p.id DESC", []
+
+
 def search_rows(filters, offset=0, limit=PAGE_SIZE):
     where, params = _search_where(filters)
+    order, order_params = _search_order(filters)
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -490,10 +565,10 @@ def search_rows(filters, offset=0, limit=PAGE_SIZE):
                 SELECT {_SELECT_FIELDS}
                 FROM properties p
                 WHERE {where}
-                ORDER BY p.current_price_billion ASC NULLS LAST, p.id DESC
+                ORDER BY {order}
                 LIMIT %s OFFSET %s
                 """,
-                [*params, limit, offset],
+                [*params, *order_params, limit, offset],
             )
             return cur.fetchall()
 
@@ -531,7 +606,13 @@ def _filters_title(filters):
     f = normalize_search_filters(filters)
     parts = []
     pmin, pmax = f.get("price_min_billion"), f.get("price_max_billion")
-    if pmin is not None and pmax is not None:
+    target = f.get("price_target_billion")
+    if target is not None and pmin is not None and pmax is not None:
+        parts.append(
+            f"💰 حدود {_fmt_number(target)} میلیارد "
+            f"({_fmt_number(pmin)} تا {_fmt_number(pmax)})"
+        )
+    elif pmin is not None and pmax is not None:
         parts.append(f"💰 {_fmt_number(pmin)} تا {_fmt_number(pmax)} میلیارد")
     elif pmax is not None:
         parts.append(f"💰 تا {_fmt_number(pmax)} میلیارد")

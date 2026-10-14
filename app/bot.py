@@ -110,6 +110,8 @@ from ingest import (
     get_property_by_media_group,
     create_raw_property,
     update_raw_text,
+    get_property_raw_text,
+    delete_property_media,
     add_media,
     add_to_queue,
     set_ingest_classification,
@@ -12109,11 +12111,11 @@ async def sync_edited_source_post(
     # this property's own unit block; the whole text would mix every unit's
     # facilities and details into one listing (and «sold» for any unit).
     catalog_blocks = split_listing_blocks(raw_text)
+    stored_code = get_source_unit_code_for_message(
+        post.chat.id,
+        post.message_id,
+    )
     if catalog_blocks:
-        stored_code = get_source_unit_code_for_message(
-            post.chat.id,
-            post.message_id,
-        )
         own_block = next(
             (block for code, block in catalog_blocks if code == stored_code),
             None,
@@ -12130,6 +12132,22 @@ async def sync_edited_source_post(
             return False
         raw_text = own_block
         source_unit_code = stored_code
+    elif (
+        stored_code
+        and source_unit_code
+        and source_unit_code != stored_code
+    ):
+        # The source reused this post for another unit. Its photos still show
+        # the old unit, so the new unit's text must not be put on top of them.
+        logging.warning(
+            "Edited SOURCE post now describes another unit; skipped: "
+            "property_id=%s message=%s stored_code=%s new_code=%s",
+            property_id,
+            post.message_id,
+            stored_code,
+            source_unit_code,
+        )
+        return False
 
     if source_text_is_sold(raw_text):
         mark_property_sold(
@@ -12264,6 +12282,37 @@ async def sync_edited_source_post(
 
     return True
 
+
+
+def is_catalog_post_media(property_id, raw_text, has_media):
+    """True when the post lists several units, so its photos fit none of them.
+
+    A listing without photos beats one showing another unit's photos. Album
+    photos that arrived before such a caption are removed again.
+    """
+    text = raw_text or (
+        get_property_raw_text(property_id)
+        if has_media
+        else ""
+    )
+
+    if not split_listing_blocks(text or ""):
+        return False
+
+    removed = (
+        delete_property_media(property_id)
+        if raw_text
+        else 0
+    )
+
+    if has_media or removed:
+        logging.info(
+            "Catalog post media not attached: property_id=%s removed=%s",
+            property_id,
+            removed,
+        )
+
+    return True
 
 
 def build_source_post_url(
@@ -12707,7 +12756,13 @@ async def input_channel_post_handler(
             raw_text,
         )
 
-    if post.photo:
+    media_allowed = not is_catalog_post_media(
+        property_id,
+        raw_text,
+        has_media,
+    )
+
+    if media_allowed and post.photo:
         photo = post.photo[-1]
 
         add_media(
@@ -12719,7 +12774,7 @@ async def input_channel_post_handler(
             position=message_id,
         )
 
-    elif post.video:
+    elif media_allowed and post.video:
         add_media(
             property_id=property_id,
             file_id=post.video.file_id,
@@ -12729,7 +12784,7 @@ async def input_channel_post_handler(
             position=message_id,
         )
 
-    elif post.document:
+    elif media_allowed and post.document:
         add_media(
             property_id=property_id,
             file_id=post.document.file_id,
