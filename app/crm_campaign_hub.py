@@ -470,7 +470,8 @@ async def escalate_customer_question(bot, user, customer_id, question_text):
         name = " ".join(part for part in (user.first_name, user.last_name) if part) or "بدون نام"
         markup = InlineKeyboardMarkup([[InlineKeyboardButton(
             "✍️ پاسخ به مشتری", callback_data=f"crm_support_reply_{ticket_id}"
-        )], [InlineKeyboardButton("💬 مشاهدهٔ گفتگو", callback_data=f"crm_support_history_{ticket_id}_0")]])
+        )], [InlineKeyboardButton("💬 مشاهدهٔ گفتگو", callback_data=f"crm_support_history_{ticket_id}_0")],
+            [InlineKeyboardButton("📞 شماره موبایل مشتری", callback_data=f"crm_support_phone_{ticket_id}")]])
         for chat_id in await asyncio.to_thread(_support_manager_chat_ids):
             try:
                 await bot.send_message(
@@ -505,9 +506,10 @@ def _support_ticket(ticket_id):
             cur.execute("""
                 SELECT t.id,t.customer_id,t.telegram_user_id,t.question_text,t.status,t.created_at,
                        COALESCE(NULLIF(BTRIM(CONCAT_WS(' ',cp.first_name,cp.last_name)),''),'بدون نام'),
-                       COALESCE(cp.phone_number,'بدون شماره')
+                       COALESCE(cp.phone_number,cu.phone_number,'بدون شماره')
                 FROM crm_support_tickets t
                 LEFT JOIN customer_profiles cp ON cp.id=t.customer_id
+                LEFT JOIN customer_profiles cu ON cu.telegram_user_id=t.telegram_user_id
                 WHERE t.id=%s
             """, (ticket_id,))
             return cur.fetchone()
@@ -531,9 +533,19 @@ async def handle_button(update, context, session):
             nav.append(InlineKeyboardButton('◀️ قبلی', callback_data=f'crm_support_history_{ticket_id}_{max(0,offset-8)}'))
         if more:
             nav.append(InlineKeyboardButton('بعدی ▶️', callback_data=f'crm_support_history_{ticket_id}_{offset+8}'))
-        keyboard = ([nav] if nav else []) + [[InlineKeyboardButton('✍️ پاسخ به مشتری', callback_data=f'crm_support_reply_{ticket_id}')]]
+        keyboard = ([nav] if nav else []) + [[InlineKeyboardButton('✍️ پاسخ به مشتری', callback_data=f'crm_support_reply_{ticket_id}')], [InlineKeyboardButton('📞 شماره موبایل مشتری', callback_data=f'crm_support_phone_{ticket_id}')]]
         for index, chunk in enumerate(chunks):
             await query.message.reply_text(chunk, reply_markup=InlineKeyboardMarkup(keyboard) if index==len(chunks)-1 else None)
+        return True
+
+    if action.startswith("crm_support_phone_"):
+        ticket_id = int(action.rsplit("_", 1)[1])
+        row = await asyncio.to_thread(_support_ticket, ticket_id)
+        if not row or row[7] == "بدون شماره":
+            await query.message.reply_text(f"📞 مشتری سؤال #{ticket_id} هنوز شماره موبایلش را ثبت نکرده است.")
+            return True
+        # A separate message keeps the number tappable for calling and easy to copy.
+        await query.message.reply_text(f"📞 شماره موبایل {row[6]} (سؤال #{ticket_id}):\n{row[7]}")
         return True
 
     if action == "crm_campaigns" or action.startswith("crm_campaign_page_"):
