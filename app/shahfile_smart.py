@@ -33,6 +33,7 @@ from shahfile_ai import (
     activate_search_subscription,
     decline_search_subscription,
     get_active_search_context,
+    apply_price_target,
     OPT_OUT_TEXT,
 )
 
@@ -1782,7 +1783,13 @@ def _search_confirmation_text(filters):
     if filters.get("district"):
         lines.append(f"📍 منطقه: {filters['district']}")
     pmin, pmax = filters.get("price_min_billion"), filters.get("price_max_billion")
-    if pmin is not None and pmax is not None:
+    target = filters.get("price_target_billion")
+    if target is not None and pmin is not None and pmax is not None:
+        lines.append(
+            f"💰 بودجه: حدود {format_billion(target)} میلیارد "
+            f"(از {format_billion(pmin)} تا {format_billion(pmax)} میلیارد)"
+        )
+    elif pmin is not None and pmax is not None:
         lines.append(f"💰 بودجه: {format_billion(pmin)} تا {format_billion(pmax)} میلیارد")
     elif pmax is not None:
         lines.append(f"💰 بودجه: تا {format_billion(pmax)} میلیارد")
@@ -1958,10 +1965,10 @@ async def handle_customer_text(update, context):
     budget = parse_budget_intent(text)
     if budget and state not in SELLER_STATES:
         low, high = budget
-        search_filters = {
+        search_filters = apply_price_target({
             "price_min_billion": float(low),
             "price_max_billion": float(high),
-        }
+        }, text)
         result_text, keyboard, _total, _sub_id = subscribe_and_render(
             user.id, customer_id, search_filters, text
         )
