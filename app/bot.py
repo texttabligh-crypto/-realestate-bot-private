@@ -14,7 +14,7 @@ import psycopg
 
 from logging_security import secure_telegram_logging
 from telegram_delivery import edit_published_message
-from telegram.error import RetryAfter, TimedOut
+from telegram.error import BadRequest, RetryAfter, TimedOut
 
 from composite_search import composite_text_predicates
 from property_filter import classify_property
@@ -9195,6 +9195,7 @@ async def post_init(application):
     start_source_deleted_posts_watcher(application)
     start_explicit_source_feature_repair(application)
     start_extended_source_location_repair(application)
+    start_category_reconcile(application)
 
     # Let startup workers emit their immediate errors first, then place
     # the scheduler snapshot at the end of the deployment health log.
@@ -16103,6 +16104,44 @@ async def sync_active_category_posts(bot):
     return result
 
 
+CATEGORY_RECONCILE_STARTUP_DELAY_SECONDS = 300
+CATEGORY_RECONCILE_INTERVAL_SECONDS = 6 * 3600
+
+
+async def category_reconcile_loop(application):
+    # Targeted syncs only rewrite categories touched by a change, so an item
+    # they missed (e.g. one skipped by the old 11-day window) stayed listed
+    # until something else changed in that range. A periodic full pass
+    # rewrites every active category post from the database.
+    await asyncio.sleep(CATEGORY_RECONCILE_STARTUP_DELAY_SECONDS)
+    while True:
+        try:
+            async with _category_sync_lock:
+                result = await sync_active_category_posts(application.bot)
+            logging.info(
+                "CATEGORY full reconcile completed: synced=%s removed=%s",
+                result.get("synced", 0),
+                result.get("removed", 0),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("CATEGORY full reconcile failed")
+        await asyncio.sleep(CATEGORY_RECONCILE_INTERVAL_SECONDS)
+
+
+def start_category_reconcile(application):
+    existing = application.bot_data.get("category_reconcile_task")
+    if existing and not existing.done():
+        return existing
+    task = asyncio.create_task(
+        category_reconcile_loop(application),
+        name="category_reconcile",
+    )
+    application.bot_data["category_reconcile_task"] = task
+    return task
+
+
 async def final_private_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = get_session(update.effective_user.id)
     if not session:
@@ -16125,6 +16164,15 @@ async def connect_bazdid_command(update: Update, context: ContextTypes.DEFAULT_T
     await handle_visit_ops_connect(update, context, session)
 
 
+async def log_unhandled_update_error(update, context):
+    # A double-tapped button re-sends identical content and Telegram rejects
+    # the edit as "not modified"; the user already sees the right message.
+    error = context.error
+    if isinstance(error, BadRequest) and "message is not modified" in str(error).lower():
+        return
+    logging.error("Unhandled update error", exc_info=error)
+
+
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set")
@@ -16138,6 +16186,7 @@ def main():
         .build()
     )
 
+    app.add_error_handler(log_unhandled_update_error)
     app.add_handler(TypeHandler(Update, record_update), group=100)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("login", login_command))
