@@ -18,7 +18,7 @@ from telegram.error import BadRequest, RetryAfter, TimedOut
 
 from composite_search import composite_text_predicates
 from property_filter import classify_property
-from property_parser import parse_property, parse_dynamic_attributes, parse_rule_attributes, parse_source_unit_code, split_listing_blocks
+from property_parser import normalize_text, parse_property, parse_dynamic_attributes, parse_rule_attributes, parse_source_unit_code, split_listing_blocks
 from publisher import get_property_for_publish, build_publish_text, publish_property, get_property_media, republish_property, get_destination_channel
 
 from scheduler import (
@@ -9077,6 +9077,156 @@ async def delayed_extended_source_location_repair(
         )
 
 
+# === MISPARSED AREA REPAIR V1 ===
+AREA_REPAIR_STARTUP_DELAY_SECONDS = 60
+AREA_REPAIR_EDIT_SPACING_SECONDS = 3.0
+
+
+def _legacy_parsed_area(text):
+    """The area the old parser produced: the first «N متر/متری» anywhere,
+    which read street names such as «۳۵ متری سینا» as the size."""
+    text = normalize_text(text or "")
+    for pattern in (
+        r"(\d+(?:\.\d+)?)\s*متر(?:ی)?",
+        r"متراژ\s*[:：\-]?\s*(\d+(?:\.\d+)?)",
+    ):
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def _area_repair_rows():
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    p.id,
+                    p.unit_code,
+                    p.area_m2,
+                    p.raw_text,
+                    COALESCE(
+                        ARRAY_AGG(ps.source_raw_text ORDER BY ps.is_primary DESC, ps.id DESC)
+                            FILTER (
+                                WHERE ps.is_active = TRUE
+                                  AND ps.source_raw_text IS NOT NULL
+                                  AND ps.source_raw_text <> ''
+                            ),
+                        ARRAY[]::TEXT[]
+                    )
+                FROM properties p
+                LEFT JOIN property_sources ps
+                  ON ps.property_id = p.id
+                WHERE p.status = 'ACTIVE'
+                  AND p.deleted_from_channel_at IS NULL
+                  AND p.published_message_id IS NOT NULL
+                  AND p.area_m2 IS NOT NULL
+                GROUP BY p.id, p.unit_code, p.area_m2, p.raw_text
+                ORDER BY p.id
+                """
+            )
+            return cur.fetchall()
+
+
+def find_misparsed_area(stored_area, texts):
+    """Return the corrected area when the stored one is the old parser's
+    mistake on one of the listing's texts, else None.
+
+    A stored value the old parser would not have produced (for example an
+    operator's manual edit) is never touched.
+    """
+    stored = float(stored_area)
+    for text in texts:
+        if not text or _legacy_parsed_area(text) != stored:
+            continue
+        corrected = parse_property(text).get("area_m2")
+        if corrected is not None and abs(float(corrected) - stored) > 0.01:
+            return float(corrected)
+        return None
+    return None
+
+
+def _save_repaired_area(property_id, old_area, new_area):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE properties
+                SET area_m2 = %s, updated_at = NOW()
+                WHERE id = %s AND area_m2 = %s
+                """,
+                (new_area, property_id, old_area),
+            )
+            changed = cur.rowcount > 0
+        conn.commit()
+    return changed
+
+
+async def repair_misparsed_areas(application):
+    repaired = []
+    rows = _area_repair_rows()
+    for property_id, unit_code, area_m2, raw_text, source_texts in rows:
+        new_area = find_misparsed_area(area_m2, [*(source_texts or []), raw_text])
+        if new_area is None or not _save_repaired_area(property_id, area_m2, new_area):
+            continue
+        repaired.append(int(property_id))
+        logging.warning(
+            "AREA_REPAIRED property_id=%s unit_code=%s old=%s new=%s",
+            property_id,
+            unit_code,
+            area_m2,
+            new_area,
+        )
+        try:
+            await refresh_published_property_post(application.bot, property_id)
+        except Exception:
+            logging.exception("Area repair post refresh failed: property_id=%s", property_id)
+        await asyncio.sleep(AREA_REPAIR_EDIT_SPACING_SECONDS)
+
+    if repaired:
+        try:
+            await queue_targeted_category_sync(
+                application.bot,
+                repaired,
+                reason="area-repair",
+            )
+        except Exception:
+            logging.exception("Category sync after area repair failed")
+
+    logging.info(
+        "AREA repair completed: checked=%s repaired=%s property_ids=%s",
+        len(rows),
+        len(repaired),
+        repaired,
+    )
+
+
+async def delayed_misparsed_area_repair(application):
+    await asyncio.sleep(AREA_REPAIR_STARTUP_DELAY_SECONDS)
+    try:
+        await repair_misparsed_areas(application)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.exception("Misparsed area repair failed")
+
+
+def start_misparsed_area_repair(application):
+    existing = application.bot_data.get("misparsed_area_repair_task")
+    if existing and not existing.done():
+        return existing
+    task = asyncio.create_task(
+        delayed_misparsed_area_repair(application),
+        name="misparsed_area_repair",
+    )
+    application.bot_data["misparsed_area_repair_task"] = task
+    return task
+
+
 def start_extended_source_location_repair(application):
     existing = application.bot_data.get(
         "extended_source_location_repair_task"
@@ -9202,6 +9352,7 @@ async def post_init(application):
     start_source_deleted_posts_watcher(application)
     start_explicit_source_feature_repair(application)
     start_extended_source_location_repair(application)
+    start_misparsed_area_repair(application)
     start_category_reconcile(application)
 
     # Let startup workers emit their immediate errors first, then place
