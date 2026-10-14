@@ -8901,6 +8901,13 @@ def _extended_location_repair_rows():
             return cur.fetchall()
 
 
+def _location_compare_key(text):
+    """Normalize hashtag and spacing noise so «#ولیعصر» matches «ولیعصر مولوی»."""
+    text = str(text or "").replace("#", " ").replace("_", " ")
+    text = text.replace("\u200c", " ").replace("ي", "ی").replace("ك", "ک")
+    return " ".join(text.split())
+
+
 async def repair_extended_source_locations(application):
     forced_repaired = []
 
@@ -8974,11 +8981,16 @@ async def repair_extended_source_locations(application):
             forced_address or parsed_address or ""
         ).strip()
 
+        # Older rows stored the hashtag district («#ولیعصر»); compare without
+        # that noise so the precise source address can still replace it.
+        current_key = _location_compare_key(current_address_text)
+        new_key = _location_compare_key(new_address_text)
+
         if (
-            not current_address_text
-            or not new_address_text
-            or len(new_address_text) < len(current_address_text)
-            or current_address_text not in new_address_text
+            not current_key
+            or not new_key
+            or len(new_key) < len(current_key)
+            or current_key not in new_key
         ):
             continue
 
