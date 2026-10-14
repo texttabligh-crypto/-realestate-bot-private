@@ -9307,6 +9307,201 @@ def start_promotional_detail_cleanup(application):
     return task
 
 
+# === INLINE FEATURE REPAIR V1 ===
+INLINE_FEATURE_REPAIR_STARTUP_DELAY_SECONDS = 120
+_INLINE_FEATURE_ATTRIBUTE_SQL = """
+    (
+        pa.attribute_key LIKE 'generic_%%'
+        OR pa.attribute_key LIKE 'source_detail_%%'
+    )
+    AND (
+        pa.attribute_label LIKE '%%✨%%'
+        OR pa.attribute_value LIKE '%%✨%%'
+    )
+"""
+
+
+def _inline_feature_repair_rows():
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    p.id,
+                    p.unit_code,
+                    p.floor_text,
+                    p.raw_text,
+                    COALESCE(
+                        ARRAY_AGG(ps.source_raw_text ORDER BY ps.is_primary DESC, ps.id DESC)
+                            FILTER (
+                                WHERE ps.is_active = TRUE
+                                  AND ps.source_raw_text IS NOT NULL
+                                  AND ps.source_raw_text <> ''
+                            ),
+                        ARRAY[]::TEXT[]
+                    )
+                FROM properties p
+                LEFT JOIN property_sources ps
+                  ON ps.property_id = p.id
+                WHERE p.status = %s
+                  AND p.deleted_from_channel_at IS NULL
+                  AND p.published_message_id IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM property_attributes pa
+                      WHERE pa.property_id = p.id
+                        AND {_INLINE_FEATURE_ATTRIBUTE_SQL}
+                  )
+                GROUP BY p.id, p.unit_code, p.floor_text, p.raw_text
+                ORDER BY p.id
+                """,
+                ("ACTIVE",),
+            )
+            return cur.fetchall()
+
+
+def _property_attribute_keys(property_id):
+    """(all attribute keys, keys of the joined ✨ detail lines)."""
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    pa.attribute_key,
+                    ({_INLINE_FEATURE_ATTRIBUTE_SQL}) AS joined
+                FROM property_attributes pa
+                WHERE pa.property_id = %s
+                """,
+                (property_id,),
+            )
+            rows = cur.fetchall()
+    return (
+        [row[0] for row in rows],
+        [row[0] for row in rows if row[1]],
+    )
+
+
+def inline_feature_repair_plan(texts, existing_keys, rules):
+    """Details to add from the listing's own text, read one per line.
+
+    Returns (text, attributes) or None. Catalog posts are left to their own
+    repair, and keys the listing already has (an operator's edit included)
+    are never overwritten.
+    """
+    text = next(
+        (
+            candidate
+            for candidate in texts
+            if candidate
+            and "✨" in candidate
+            and not split_listing_blocks(candidate)
+        ),
+        None,
+    )
+    if text is None:
+        return None
+
+    merged = {}
+    for item in parse_dynamic_attributes(text) + parse_rule_attributes(text, rules):
+        merged[item["attribute_key"]] = item
+
+    if any(
+        "✨" in f"{item['attribute_label']} {item['attribute_value']}"
+        for item in merged.values()
+    ):
+        return None
+
+    existing = set(existing_keys or [])
+    return text, [
+        item
+        for key, item in merged.items()
+        if key not in existing
+    ]
+
+
+def _fill_missing_floor(property_id, floor_text):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE properties
+                SET floor_text = %s, updated_at = NOW()
+                WHERE id = %s
+                  AND NULLIF(BTRIM(COALESCE(floor_text, '')), '') IS NULL
+                """,
+                (floor_text, property_id),
+            )
+        conn.commit()
+
+
+async def repair_inline_feature_details(application):
+    # Older parses kept a source's «مشخصات ملک ✨ … ✨ …» run as one detail
+    # line; rebuild those listings' details one feature per line.
+    rules = get_active_attribute_rules()
+    repaired = []
+    rows = _inline_feature_repair_rows()
+    for property_id, unit_code, floor_text, raw_text, source_texts in rows:
+        all_keys, joined_keys = _property_attribute_keys(property_id)
+        plan = inline_feature_repair_plan(
+            [*(source_texts or []), raw_text],
+            [key for key in all_keys if key not in joined_keys],
+            rules,
+        )
+        if plan is None or not joined_keys:
+            continue
+        text, new_attributes = plan
+
+        _delete_attributes([(property_id, key) for key in joined_keys])
+        save_property_attributes(property_id, new_attributes)
+        new_floor = None if floor_text else parse_property(text).get("floor_text")
+        if new_floor:
+            _fill_missing_floor(property_id, new_floor)
+
+        repaired.append(int(property_id))
+        logging.warning(
+            "INLINE_FEATURES_REPAIRED property_id=%s unit_code=%s removed=%s added=%s floor=%s",
+            property_id,
+            unit_code,
+            len(joined_keys),
+            [item["attribute_key"] for item in new_attributes],
+            new_floor,
+        )
+        try:
+            await refresh_published_property_post(application.bot, property_id)
+        except Exception:
+            logging.exception("Inline feature repair refresh failed: property_id=%s", property_id)
+        await asyncio.sleep(AREA_REPAIR_EDIT_SPACING_SECONDS)
+
+    logging.info(
+        "INLINE feature repair completed: checked=%s repaired=%s property_ids=%s",
+        len(rows),
+        len(repaired),
+        repaired,
+    )
+
+
+async def delayed_inline_feature_repair(application):
+    await asyncio.sleep(INLINE_FEATURE_REPAIR_STARTUP_DELAY_SECONDS)
+    try:
+        await repair_inline_feature_details(application)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.exception("Inline feature repair failed")
+
+
+def start_inline_feature_repair(application):
+    existing = application.bot_data.get("inline_feature_repair_task")
+    if existing and not existing.done():
+        return existing
+    task = asyncio.create_task(
+        delayed_inline_feature_repair(application),
+        name="inline_feature_repair",
+    )
+    application.bot_data["inline_feature_repair_task"] = task
+    return task
+
+
 def start_extended_source_location_repair(application):
     existing = application.bot_data.get(
         "extended_source_location_repair_task"
@@ -9434,6 +9629,7 @@ async def post_init(application):
     start_extended_source_location_repair(application)
     start_misparsed_area_repair(application)
     start_promotional_detail_cleanup(application)
+    start_inline_feature_repair(application)
     start_category_reconcile(application)
 
     # Let startup workers emit their immediate errors first, then place
