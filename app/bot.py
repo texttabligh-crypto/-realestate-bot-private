@@ -87,6 +87,7 @@ from shahfile_smart import (
 )
 from shahfile_ai import start_search_watch_worker
 from customer_transcript import TranscriptBot, record_update, ensure_schema as ensure_transcript_schema
+from update_metrics import TimedUpdateProcessor
 from telegram.ext import TypeHandler
 from crm_campaign_hub import (
     ensure_schema as ensure_campaign_crm_schema,
@@ -16132,6 +16133,8 @@ def main():
         Application.builder()
         .bot(TranscriptBot(token=BOT_TOKEN))
         .post_init(post_init)
+        # One update at a time, as before; the processor only measures.
+        .concurrent_updates(TimedUpdateProcessor(1, db_probe=db_connect))
         .build()
     )
 
