@@ -8,12 +8,12 @@ from pathlib import Path
 
 def load_repair(namespace):
     source = Path(__file__).parent.joinpath("app", "bot.py").read_text(encoding="utf-8")
-    node = next(
+    nodes = [
         n for n in ast.parse(source).body
-        if isinstance(n, ast.AsyncFunctionDef) and n.name == "repair_extended_source_locations"
-    )
+        if getattr(n, "name", None) in {"_location_compare_key", "repair_extended_source_locations"}
+    ]
     namespace.update({"asyncio": asyncio, "logging": logging})
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace["repair_extended_source_locations"]
 
 
@@ -37,6 +37,8 @@ class LocationRepairTest(unittest.TestCase):
             "_extended_location_repair_rows": lambda: [
                 (3, "200", "ولیعصر", "raw-same"),        # parsed address unchanged
                 (4, "201", "ولیعصر", "raw-longer"),      # parsed address is more precise
+                (5, "31427", "#ولیعصر", "raw-longer"),   # old hashtag-only address
+                (6, "300", "ونک", "raw-longer"),         # unrelated address is never applied
             ],
             "parse_property": lambda raw: {
                 "address_text": "ولیعصر" if raw == "raw-same" else "ولیعصر مولوی"
@@ -50,8 +52,8 @@ class LocationRepairTest(unittest.TestCase):
         finally:
             asyncio.sleep = real_sleep
 
-        self.assertEqual(saved, [(2, "پونک"), (4, "ولیعصر مولوی")])
-        self.assertEqual(refreshed, [2, 4])
+        self.assertEqual(saved, [(2, "پونک"), (4, "ولیعصر مولوی"), (5, "ولیعصر مولوی")])
+        self.assertEqual(refreshed, [2, 4, 5])
 
 
 if __name__ == "__main__":
