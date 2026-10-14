@@ -16,6 +16,7 @@ from telegram import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
+from telegram.error import Forbidden
 
 from shahfile_ai import (
     _search_where,
@@ -1725,6 +1726,49 @@ def _mark_delivery_failed(
         conn.commit()
 
 
+def _disable_blocked_visitor(
+    delivery_id,
+    visitor_id,
+    error_text,
+):
+    """Stop campaign pushes to a user who blocked the bot.
+
+    Reopening the showcase link reactivates the visitor.
+    """
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE customer_campaign_deliveries
+                SET
+                    delivery_status = 'FAILED',
+                    attempts = attempts + 1,
+                    last_error = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (
+                    str(error_text)[:1000],
+                    delivery_id,
+                ),
+            )
+
+            cur.execute(
+                """
+                UPDATE customer_showcase_visitors
+                SET
+                    is_active = FALSE,
+                    deactivated_at = NOW()
+                WHERE id = %s
+                """,
+                (
+                    visitor_id,
+                ),
+            )
+
+        conn.commit()
+
+
 def _new_match_text(
     row,
 ):
@@ -2145,6 +2189,23 @@ async def run_campaign_watch_once(
             _mark_delivery_sent(
                 delivery_id,
                 sent.message_id,
+            )
+
+        except Forbidden as exc:
+            logging.warning(
+                (
+                    "Campaign visitor disabled: "
+                    "delivery=%s user=%s reason=%s"
+                ),
+                delivery_id,
+                row[2],
+                exc.message,
+            )
+
+            _disable_blocked_visitor(
+                delivery_id,
+                visitor_id,
+                exc,
             )
 
         except Exception as exc:
