@@ -7589,6 +7589,9 @@ def get_delete_watch_property_ids(
     after_id=0,
     limit=25,
 ):
+    # Category posts list every active published property regardless of
+    # age, so deletion checks must cover them all; an age window left posts
+    # deleted from the channel listed in categories indefinitely.
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -7598,8 +7601,6 @@ def get_delete_watch_property_ids(
                 WHERE status = 'ACTIVE'
                   AND published_message_id IS NOT NULL
                   AND deleted_from_channel_at IS NULL
-                  AND COALESCE(published_at, created_at)
-                      >= NOW() - INTERVAL '11 days'
                   AND id > %s
                 ORDER BY id
                 LIMIT %s
@@ -7622,8 +7623,6 @@ def get_delete_watch_property_ids(
                     WHERE status = 'ACTIVE'
                       AND published_message_id IS NOT NULL
                       AND deleted_from_channel_at IS NULL
-                      AND COALESCE(published_at, created_at)
-                          >= NOW() - INTERVAL '11 days'
                       AND id <= %s
                     ORDER BY id
                     LIMIT %s
