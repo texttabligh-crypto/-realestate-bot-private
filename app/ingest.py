@@ -140,6 +140,29 @@ def update_raw_text(property_id, raw_text):
             conn.commit()
 
 
+def get_property_raw_text(property_id):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT raw_text FROM properties WHERE id = %s",
+                (property_id,),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+
+
+def delete_property_media(property_id):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM property_media WHERE property_id = %s",
+                (property_id,),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+    return deleted
+
+
 def media_exists(property_id, file_unique_id):
     if not file_unique_id:
         return False

@@ -101,6 +101,10 @@ def normalize_text(text: str) -> str:
 _LISTING_CODE_LINE = re.compile(
     r"(?m)^[^\w\n]{0,8}کد\s*(?:فایل|واحد|ملک|آگهی)\s*[:：\-]?\s*(\d+)"
 )
+# A real catalog unit carries its own area and price; a second code line
+# such as «کد آگهی: …» inside one listing does not.
+_LISTING_AREA = re.compile(r"\d+(?:[./]\d+)?\s*متر|متراژ")
+_LISTING_PRICE = re.compile(r"قیمت|میلیارد|میلیون|تومان|توافقی")
 
 
 def split_listing_blocks(text: str):
@@ -116,10 +120,14 @@ def split_listing_blocks(text: str):
 
     header = text[:matches[0].start()]
     blocks = []
+    listings = 0
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        blocks.append((match.group(1), header + text[match.start():end].strip()))
-    return blocks
+        unit = text[match.start():end].strip()
+        if _LISTING_AREA.search(unit) and _LISTING_PRICE.search(unit):
+            listings += 1
+        blocks.append((match.group(1), header + unit))
+    return blocks if listings >= 2 else []
 
 
 def primary_listing_text(text: str) -> str:

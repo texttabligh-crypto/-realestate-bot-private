@@ -81,6 +81,11 @@ class CatalogParsingTest(unittest.TestCase):
         self.assertEqual(split_listing_blocks(single), [])
         self.assertIs(parse_property(single)["has_parking"], False)
 
+    def test_second_code_line_without_its_own_listing_is_not_a_catalog(self):
+        single = "🏡 کد فایل: 152\n📍 نصر\n75 متر\nکد آگهی: 98765\nقیمت کل: 7 میلیارد"
+        self.assertEqual(split_listing_blocks(single), [])
+        self.assertEqual(parse_property(single)["current_price_billion"], 7.0)
+
 
 def load_sync(namespace):
     source = (APP / "bot.py").read_text(encoding="utf-8")
@@ -91,7 +96,7 @@ def load_sync(namespace):
 
 
 class EditedCatalogSyncTest(unittest.TestCase):
-    def run_sync(self, stored_code):
+    def run_sync(self, stored_code, text=CATALOG):
         calls = []
 
         async def record_async(name, *args, **kwargs):
@@ -127,7 +132,7 @@ class EditedCatalogSyncTest(unittest.TestCase):
             "queue_targeted_category_sync": lambda *a, **k: record_async("categories"),
             "sync_categories_for_price_change": lambda *a, **k: record_async("categories"),
         })
-        post = type("Post", (), {"caption": None, "text": CATALOG, "message_id": 6401,
+        post = type("Post", (), {"caption": None, "text": text, "message_id": 6401,
                                  "chat": type("Chat", (), {"id": -100})()})()
         context = type("Ctx", (), {"bot": None})()
         result = asyncio.run(sync(post, context))
@@ -156,6 +161,54 @@ class EditedCatalogSyncTest(unittest.TestCase):
             result, calls = self.run_sync("68")
         self.assertFalse(result)
         self.assertEqual(calls, [])
+
+    def test_post_reused_for_another_unit_is_left_alone(self):
+        # Its photos still show unit 68; unit 152's text must not go on them.
+        with self.assertLogs(level=logging.WARNING):
+            result, calls = self.run_sync("68", text=UNIT_152)
+        self.assertFalse(result)
+        self.assertEqual(calls, [])
+
+    def test_edit_of_the_same_unit_is_applied(self):
+        result, calls = self.run_sync("152", text=UNIT_152)
+        self.assertTrue(result)
+        update = next(args for name, args, _ in calls if name == "update")
+        self.assertEqual(update[1]["area_m2"], 75.0)
+        self.assertNotIn("clear_details", [name for name, _, _ in calls])
+
+
+def load_media_guard(namespace):
+    source = (APP / "bot.py").read_text(encoding="utf-8")
+    node = next(n for n in ast.parse(source).body if getattr(n, "name", None) == "is_catalog_post_media")
+    namespace.update({"logging": logging, "split_listing_blocks": split_listing_blocks})
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    return namespace["is_catalog_post_media"]
+
+
+class CatalogMediaTest(unittest.TestCase):
+    def guard(self, stored_text=""):
+        deleted = []
+        guard = load_media_guard({
+            "get_property_raw_text": lambda pid: stored_text,
+            "delete_property_media": lambda pid: deleted.append(pid) or 3,
+        })
+        return guard, deleted
+
+    def test_catalog_caption_drops_its_photos(self):
+        guard, deleted = self.guard()
+        self.assertTrue(guard(286, CATALOG, True))
+        self.assertEqual(deleted, [286])  # album photos that came first
+
+    def test_captionless_album_photo_of_a_catalog_is_skipped(self):
+        guard, deleted = self.guard(stored_text=CATALOG)
+        self.assertTrue(guard(286, "", True))
+        self.assertEqual(deleted, [])
+
+    def test_single_listing_keeps_its_photos(self):
+        guard, deleted = self.guard(stored_text=UNIT_152)
+        self.assertFalse(guard(286, UNIT_152, True))
+        self.assertFalse(guard(286, "", True))
+        self.assertEqual(deleted, [])
 
 
 if __name__ == "__main__":
