@@ -18,7 +18,7 @@ from telegram.error import BadRequest, RetryAfter, TimedOut
 
 from composite_search import composite_text_predicates
 from property_filter import classify_property
-from property_parser import is_promotional_attribute, normalize_text, parse_property, parse_dynamic_attributes, parse_rule_attributes, parse_source_unit_code, split_listing_blocks
+from property_parser import is_direction_only_detail, is_headline_detail, is_promotional_attribute, normalize_text, parse_property, parse_dynamic_attributes, parse_rule_attributes, parse_source_unit_code, split_listing_blocks
 from publisher import get_property_for_publish, build_publish_text, publish_property, get_property_media, republish_property, get_destination_channel
 
 from scheduler import (
@@ -9259,13 +9259,50 @@ def _delete_attributes(keys):
         conn.commit()
 
 
+def _properties_with_direction(property_ids):
+    if not property_ids:
+        return set()
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM properties
+                WHERE id = ANY(%s)
+                  AND NULLIF(BTRIM(COALESCE(direction, '')), '') IS NOT NULL
+                """,
+                (list(property_ids),),
+            )
+            return {int(row[0]) for row in cur.fetchall()}
+
+
 async def remove_promotional_details(application):
-    # Older parses copied source contact lines such as «بله: https://ble.ir/…»
-    # into listings; the parser drops them now, this clears the saved ones.
+    # Older parses copied source contact lines such as «بله: https://ble.ir/…»,
+    # title lines («فروش آپارتمان … متری در …») and «موقعیت: جنوبی» beside the
+    # direction line into listings; the parser drops them now, this clears
+    # the saved ones.
+    rows = _auto_detail_attribute_rows()
+    direction_only = {
+        (property_id, attribute_key)
+        for property_id, attribute_key, label, value in rows
+        if str(attribute_key).startswith(("source_detail_", "generic_"))
+        and is_direction_only_detail(label, value)
+    }
+    with_direction = _properties_with_direction(
+        {property_id for property_id, _key in direction_only}
+    )
     promotional = [
         (property_id, attribute_key)
-        for property_id, attribute_key, label, value in _auto_detail_attribute_rows()
+        for property_id, attribute_key, label, value in rows
         if is_promotional_attribute(label, value)
+        or (
+            str(attribute_key).startswith("source_detail_")
+            and is_headline_detail(value)
+        )
+        or (
+            (property_id, attribute_key) in direction_only
+            and property_id in with_direction
+        )
     ]
     if promotional:
         _delete_attributes(promotional)

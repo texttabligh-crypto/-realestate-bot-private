@@ -1218,6 +1218,30 @@ def is_promotional_attribute(label, value):
     )
 
 
+# A source's title line («فروش آپارتمان بازسازی شده ۱۷۰ متری در شهرک پرواز»)
+# only repeats the area, location and condition already shown on their own.
+_HEADLINE_DETAIL = re.compile(
+    r"^(?:فروش|پیش\s*فروش)\s+(?:فوری\s+)?"
+    r"(?:آپارتمان|واحد|ملک|خانه|منزل|ویلا|زمین|مغازه|دفتر|سوئیت)"
+)
+_DIRECTION_WORD = r"(?:شمالی|جنوبی|شرقی|غربی)"
+_DIRECTION_ONLY = re.compile(
+    rf"^(?:(?:موقعیت|جهت)(?:\s*(?:واحد|ساختمان|ملک))?\s*[:：\-]?\s*)?"
+    rf"{_DIRECTION_WORD}(?:\s*(?:[-–/]|و)?\s*{_DIRECTION_WORD})?$"
+)
+
+
+def is_headline_detail(value):
+    return bool(_HEADLINE_DETAIL.match(normalize_text(str(value or ""))))
+
+
+def is_direction_only_detail(label, value):
+    """«موقعیت: جنوبی» repeats the direction line («🧭 جنوبی»)."""
+    label = re.sub(r"^[^0-9A-Za-zآ-ی]+", "", str(label or "")).strip()
+    text = str(value or "") if label in ("", "جزئیات") else f"{label}: {value or ''}"
+    return bool(_DIRECTION_ONLY.match(re.sub(r"\s+", " ", normalize_text(text)).strip()))
+
+
 def parse_dynamic_attributes(text: str):
     text = primary_listing_text(text or "")
     attributes = []
@@ -2222,13 +2246,25 @@ def parse_dynamic_attributes(text: str):
         source_detail_order += 1
 
 
-    # Never republish a source's own channels, links or contact handles.
+    # Never republish a source's own channels, links or contact handles, its
+    # title line, or a direction the direction line already shows.
     return [
         item
         for item in attributes
         if not is_promotional_attribute(
             item.get("attribute_label"),
             item.get("attribute_value"),
+        )
+        and not (
+            str(item.get("attribute_key") or "").startswith("source_detail_")
+            and is_headline_detail(item.get("attribute_value"))
+        )
+        and not (
+            str(item.get("attribute_key") or "").startswith(("source_detail_", "generic_"))
+            and is_direction_only_detail(
+                item.get("attribute_label"),
+                item.get("attribute_value"),
+            )
         )
     ]
 

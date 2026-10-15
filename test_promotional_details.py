@@ -9,7 +9,12 @@ from pathlib import Path
 APP = Path(__file__).parent / "app"
 sys.path.insert(0, str(APP))
 
-from property_parser import is_promotional_attribute, parse_dynamic_attributes  # noqa: E402
+from property_parser import (  # noqa: E402
+    is_direction_only_detail,
+    is_headline_detail,
+    is_promotional_attribute,
+    parse_dynamic_attributes,
+)
 
 SOURCE = """🏡 کد فایل: ۱۰۴۴۱
 📍 زعفرانیه
@@ -50,19 +55,31 @@ class PromotionalDetailTest(unittest.TestCase):
             "logging": logging,
             "AREA_REPAIR_EDIT_SPACING_SECONDS": 0,
             "is_promotional_attribute": is_promotional_attribute,
+            "is_headline_detail": is_headline_detail,
+            "is_direction_only_detail": is_direction_only_detail,
             "_auto_detail_attribute_rows": lambda: [
                 (5, "generic_aaa", "بله", "https://ble.ir/bashiri_melk"),
                 (5, "source_detail_b", "جزئیات", "تک مستر"),
                 (7, "generic_ccc", "پارکینگ", "بله"),
                 (9, "generic_ddd", "ایتا", "eitaa.com/x"),
+                # Unit 32932: the source's title line and «موقعیت: جنوبی».
+                (11, "source_detail_e", "جزئیات", "فروش آپارتمان بازسازی شده 170 متری در شهرک پرواز"),
+                (11, "generic_fff", "موقعیت", "جنوبی"),
+                (11, "generic_ggg", "موقعیت محلی", "بهترین کوی شهرک پرواز"),
+                # No direction stored: its only direction line stays.
+                (13, "source_detail_h", "جزئیات", "موقعیت شمالی"),
             ],
+            "_properties_with_direction": lambda ids: {11} & set(ids),
             "_delete_attributes": lambda keys: deleted.extend(keys),
             "refresh_published_property_post": refresh,
         }
         exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), ns)
         asyncio.run(ns["remove_promotional_details"](type("App", (), {"bot": None})()))
-        self.assertEqual(deleted, [(5, "generic_aaa"), (9, "generic_ddd")])
-        self.assertEqual(refreshed, [5, 9])
+        self.assertEqual(
+            deleted,
+            [(5, "generic_aaa"), (9, "generic_ddd"), (11, "source_detail_e"), (11, "generic_fff")],
+        )
+        self.assertEqual(refreshed, [5, 9, 11])
 
 
 if __name__ == "__main__":
