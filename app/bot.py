@@ -19,7 +19,7 @@ from telegram.error import BadRequest, RetryAfter, TimedOut
 from composite_search import composite_text_predicates
 from property_filter import classify_property
 from property_parser import is_direction_only_detail, is_headline_detail, is_promotional_attribute, normalize_text, parse_property, parse_dynamic_attributes, parse_rule_attributes, parse_source_unit_code, split_listing_blocks
-from publisher import get_property_for_publish, build_publish_text, publish_property, get_property_media, republish_property, get_destination_channel
+from publisher import get_property_for_publish, build_publish_text, publish_property, get_property_media, republish_property, get_destination_channel, build_channel_post_url
 
 from scheduler import (
     log_scheduler_health_snapshot,
@@ -84,6 +84,7 @@ from shahfile_smart import (
     handle_customer_photo as handle_smart_customer_photo,
     handle_customer_contact as handle_smart_customer_contact,
     handle_manager_text as handle_smart_manager_text,
+    _owner_telegram_ids as owner_telegram_ids,
 )
 from shahfile_ai import start_search_watch_worker
 from customer_transcript import TranscriptBot, record_update, ensure_schema as ensure_transcript_schema
@@ -7463,6 +7464,7 @@ async def run_source_deleted_posts_watch_tick(
     missing = 0
     unknown = 0
     destination_deleted = 0
+    manual_removals = []
 
     for (
         property_source_id,
@@ -7528,6 +7530,19 @@ async def run_source_deleted_posts_watch_tick(
                     property_id,
                 )
                 await asyncio.sleep(5.0)
+            except ChannelPostTooOldToDelete:
+                try:
+                    await retire_listing_kept_in_channel(
+                        application.bot,
+                        property_id,
+                    )
+                    manual_removals.append(property_id)
+                except Exception:
+                    logging.exception(
+                        "Could not withdraw listing after source deletion: property_id=%s",
+                        property_id,
+                    )
+                await asyncio.sleep(1.0)
             except RetryAfter as exc:
                 logging.warning(
                     "SOURCE delete cleanup paused by Telegram flood control: %s",
@@ -7540,13 +7555,27 @@ async def run_source_deleted_posts_watch_tick(
                     property_id,
                 )
 
+    if manual_removals:
+        try:
+            await notify_manual_channel_removals(
+                application.bot,
+                manual_removals,
+            )
+        except Exception:
+            logging.exception(
+                "Could not report listings that need manual channel removal: %s",
+                manual_removals,
+            )
+
     logging.info(
         "SOURCE deleted-post watcher completed: "
-        "checked=%s missing=%s unknown=%s destination_deleted=%s",
+        "checked=%s missing=%s unknown=%s destination_deleted=%s "
+        "manual_removal=%s",
         checked,
         missing,
         unknown,
         destination_deleted,
+        len(manual_removals),
     )
 
 
@@ -12027,6 +12056,187 @@ async def sync_active_category_posts(
 
 
 
+class ChannelPostTooOldToDelete(RuntimeError):
+    """Telegram does not let bots delete channel posts older than 48 hours."""
+
+
+def deactivate_removed_property(
+    property_id,
+    queue_reason="Force deleted by operator",
+):
+    # Preserve history, but make the property inactive everywhere.
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                UPDATE properties
+                SET
+                    status = 'INACTIVE',
+                    deleted_from_channel_at = COALESCE(
+                        deleted_from_channel_at,
+                        NOW()
+                    ),
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (property_id,),
+            )
+
+            cur.execute(
+                """
+                UPDATE property_sources
+                SET
+                    is_active = FALSE,
+                    updated_at = NOW()
+                WHERE property_id = %s
+                """,
+                (property_id,),
+            )
+
+            cur.execute(
+                """
+                UPDATE publish_queue
+                SET
+                    queue_status = 'SKIPPED',
+                    last_error = %s,
+                    updated_at = NOW()
+                WHERE property_id = %s
+                  AND queue_status IN (
+                      'NEW',
+                      'PARSED',
+                      'READY',
+                      'SCHEDULED',
+                      'PENDING_DUPLICATE',
+                      'FAILED'
+                  )
+                """,
+                (queue_reason, property_id),
+            )
+
+            conn.commit()
+
+
+async def retire_listing_kept_in_channel(
+    bot,
+    property_id,
+):
+    """
+    Withdraw a listing whose source post is gone but whose channel post is
+    too old for the bot to delete: the bot stops offering it in search,
+    categories and visits, and an owner removes the post by hand.
+    """
+
+    deactivate_removed_property(
+        property_id,
+        "Source post deleted; channel post must be removed by hand",
+    )
+
+    await queue_targeted_category_sync(
+        bot,
+        [property_id],
+        reason="source-deleted-manual-removal",
+    )
+
+
+MANUAL_REMOVAL_LINES_PER_MESSAGE = 30
+
+
+def manual_channel_removal_messages(
+    rows,
+    destination_username,
+):
+    """rows: (unit_code, published_message_id, channel_post_url)."""
+
+    entries = []
+
+    for unit_code, message_id, channel_post_url in rows:
+        url = (
+            build_channel_post_url(
+                destination_username,
+                message_id,
+            )
+            or channel_post_url
+            or f"پیام {message_id}"
+        )
+        entries.append(
+            f"• کد {unit_code or '-'}: {url}"
+        )
+
+    header = (
+        "🧹 این فایل‌ها از کانال منبع حذف شده‌اند ولی پستشان در کانال ما مانده.\n"
+        "تلگرام اجازه نمی‌دهد ربات پست‌های قدیمی‌تر از ۴۸ ساعت را پاک کند؛ "
+        "لطفاً این پست‌ها را خودتان از کانال حذف کنید.\n"
+        "ربات این فایل‌ها را از جستجو، دسته‌بندی‌ها و بازدید برداشت."
+    )
+
+    return [
+        header
+        + "\n\n"
+        + "\n".join(
+            entries[start:start + MANUAL_REMOVAL_LINES_PER_MESSAGE]
+        )
+        for start in range(
+            0,
+            len(entries),
+            MANUAL_REMOVAL_LINES_PER_MESSAGE,
+        )
+    ]
+
+
+async def notify_manual_channel_removals(
+    bot,
+    property_ids,
+):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    unit_code,
+                    published_message_id,
+                    channel_post_url
+                FROM properties
+                WHERE id = ANY(%s)
+                ORDER BY id
+                """,
+                (list(property_ids),),
+            )
+            rows = cur.fetchall()
+
+    destination = get_destination_channel()
+    destination_username = destination[2] if destination else None
+
+    for unit_code, message_id, channel_post_url in rows:
+        logging.warning(
+            "SOURCE deleted listing needs manual channel removal: "
+            "unit_code=%s url=%s",
+            unit_code,
+            build_channel_post_url(destination_username, message_id)
+            or channel_post_url,
+        )
+
+    messages = manual_channel_removal_messages(
+        rows,
+        destination_username,
+    )
+
+    for owner_chat_id in owner_telegram_ids():
+        for text in messages:
+            try:
+                await bot.send_message(
+                    chat_id=owner_chat_id,
+                    text=text,
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                logging.exception(
+                    "Could not send manual channel removal list: owner=%s",
+                    owner_chat_id,
+                )
+                break
+
+
 async def force_delete_property(
     bot,
     property_id,
@@ -12134,6 +12344,16 @@ async def force_delete_property(
                 continue
 
             if (
+                "message can't be deleted" in error_text
+                and not deleted_messages
+            ):
+                # The rest of the album is just as old; stop here.
+                raise ChannelPostTooOldToDelete(
+                    "تلگرام اجازه نمی‌دهد ربات پست‌های قدیمی‌تر از ۴۸ ساعت "
+                    "را پاک کند؛ لطفاً پست را دستی از کانال حذف کنید."
+                ) from exc
+
+            if (
                 "timed out" in error_text
                 or "timeout" in error_text
             ):
@@ -12177,57 +12397,7 @@ async def force_delete_property(
             + " | ".join(warnings)[:1000]
         )
 
-    # Preserve history, but make the property inactive everywhere.
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-
-            cur.execute(
-                """
-                UPDATE properties
-                SET
-                    status = 'INACTIVE',
-                    deleted_from_channel_at = COALESCE(
-                        deleted_from_channel_at,
-                        NOW()
-                    ),
-                    updated_at = NOW()
-                WHERE id = %s
-                """,
-                (property_id,),
-            )
-
-            cur.execute(
-                """
-                UPDATE property_sources
-                SET
-                    is_active = FALSE,
-                    updated_at = NOW()
-                WHERE property_id = %s
-                """,
-                (property_id,),
-            )
-
-            cur.execute(
-                """
-                UPDATE publish_queue
-                SET
-                    queue_status = 'SKIPPED',
-                    last_error = 'Force deleted by operator',
-                    updated_at = NOW()
-                WHERE property_id = %s
-                  AND queue_status IN (
-                      'NEW',
-                      'PARSED',
-                      'READY',
-                      'SCHEDULED',
-                      'PENDING_DUPLICATE',
-                      'FAILED'
-                  )
-                """,
-                (property_id,),
-            )
-
-            conn.commit()
+    deactivate_removed_property(property_id)
 
     category_result = await queue_targeted_category_sync(
         bot,

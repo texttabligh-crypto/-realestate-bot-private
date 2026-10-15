@@ -58,6 +58,13 @@ async def main():
                 failed += 1
                 logging.warning("Cleanup stopped by Telegram flood control: %s", exc)
                 break
+            except realestate.ChannelPostTooOldToDelete:
+                manual_required += 1
+                print(
+                    "SOURCE_ORPHAN_MANUAL_DELETE_REQUIRED "
+                    f"property_id={property_id} unit_code={unit_code} "
+                    f"message_id={message_id}"
+                )
             except Exception as exc:
                 if "message can't be deleted" in str(exc).lower():
                     manual_required += 1
