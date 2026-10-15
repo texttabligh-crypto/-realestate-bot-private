@@ -127,6 +127,7 @@ from ingest import (
     get_active_attribute_rules,
     save_property_source,
     save_property_address,
+    live_property_for_source_post,
 )
 
 from telegram import (
@@ -9770,6 +9771,175 @@ async def delayed_catalog_hijack_repair(application):
         logging.exception("Catalog hijack repair failed")
 
 
+UNTRACKED_SOURCE_REPAIR_STARTUP_DELAY_SECONDS = 160
+
+
+def reconnect_untracked_source_listings():
+    """
+    Give live listings that lost every source row back their source post.
+
+    A forwarded copy of a post used to take the source row from the listing
+    that already tracked it (27027 lost it to 26527), so the bot stopped
+    noticing when the source edited or deleted that post. The row is moved
+    back when its current holder is no longer live; otherwise a row for the
+    listing's own first source message is added. Rows start unchecked so the
+    source watcher looks at them first.
+    """
+
+    restored = []
+    created = []
+    skipped = []
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    p.id,
+                    c.id,
+                    p.input_message_id,
+                    p.raw_text,
+                    COALESCE(
+                        ARRAY_AGG(pm.position)
+                            FILTER (WHERE pm.position IS NOT NULL),
+                        '{}'
+                    )
+                FROM properties p
+                JOIN channels c
+                  ON c.telegram_channel_id = p.input_channel_id
+                 AND c.channel_type = 'SOURCE'
+                LEFT JOIN property_media pm
+                  ON pm.property_id = p.id
+                WHERE p.status = 'ACTIVE'
+                  AND p.published_message_id IS NOT NULL
+                  AND p.deleted_from_channel_at IS NULL
+                  AND p.input_message_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM property_sources ps
+                      WHERE ps.property_id = p.id
+                  )
+                GROUP BY p.id, c.id
+                ORDER BY p.id
+                """
+            )
+            listings = cur.fetchall()
+
+            for (
+                property_id,
+                channel_db_id,
+                input_message_id,
+                raw_text,
+                positions,
+            ) in listings:
+                message_ids = sorted(
+                    {int(input_message_id)}
+                    | {int(position) for position in positions}
+                )
+
+                cur.execute(
+                    """
+                    UPDATE property_sources
+                    SET
+                        property_id = %s,
+                        is_primary = TRUE,
+                        is_active = TRUE,
+                        last_synced_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = (
+                        SELECT ps.id
+                        FROM property_sources ps
+                        JOIN properties holder
+                          ON holder.id = ps.property_id
+                        WHERE ps.source_channel_id = %s
+                          AND ps.source_message_id = ANY(%s)
+                          AND (
+                                holder.status <> 'ACTIVE'
+                                OR holder.deleted_from_channel_at IS NOT NULL
+                          )
+                        ORDER BY ps.id
+                        LIMIT 1
+                    )
+                    RETURNING id
+                    """,
+                    (property_id, channel_db_id, message_ids),
+                )
+
+                if cur.fetchone():
+                    restored.append(property_id)
+                    continue
+
+                cur.execute(
+                    """
+                    INSERT INTO property_sources (
+                        property_id,
+                        source_channel_id,
+                        source_message_id,
+                        source_raw_text,
+                        is_primary,
+                        is_active,
+                        last_synced_at,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, TRUE, TRUE, NULL, NOW())
+                    ON CONFLICT (
+                        source_channel_id,
+                        source_message_id
+                    )
+                    DO NOTHING
+                    RETURNING id
+                    """,
+                    (
+                        property_id,
+                        channel_db_id,
+                        input_message_id,
+                        raw_text,
+                    ),
+                )
+
+                if cur.fetchone():
+                    created.append(property_id)
+                else:
+                    # Another live listing holds that post: a real
+                    # duplicate pair, left for the duplicate review.
+                    skipped.append(property_id)
+
+        conn.commit()
+
+    return restored, created, skipped
+
+
+async def delayed_untracked_source_repair(application):
+    await asyncio.sleep(UNTRACKED_SOURCE_REPAIR_STARTUP_DELAY_SECONDS)
+    try:
+        restored, created, skipped = await asyncio.to_thread(
+            reconnect_untracked_source_listings
+        )
+        logging.info(
+            "UNTRACKED source repair completed: restored=%s created=%s "
+            "skipped=%s",
+            restored,
+            created,
+            skipped,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.exception("Untracked source repair failed")
+
+
+def start_untracked_source_repair(application):
+    existing = application.bot_data.get("untracked_source_repair_task")
+    if existing and not existing.done():
+        return existing
+    task = asyncio.create_task(
+        delayed_untracked_source_repair(application),
+        name="untracked_source_repair",
+    )
+    application.bot_data["untracked_source_repair_task"] = task
+    return task
+
+
 def start_catalog_hijack_repair(application):
     existing = application.bot_data.get("catalog_hijack_repair_task")
     if existing and not existing.done():
@@ -9912,6 +10082,7 @@ async def post_init(application):
     start_promotional_detail_cleanup(application)
     start_inline_feature_repair(application)
     start_catalog_hijack_repair(application)
+    start_untracked_source_repair(application)
     start_category_reconcile(application)
 
     # Let startup workers emit their immediate errors first, then place
@@ -13349,6 +13520,24 @@ async def input_channel_post_handler(
                 origin_message_id,
                 effective_source_url,
             )
+
+            already_listed = live_property_for_source_post(
+                origin_chat.id,
+                origin_message_id,
+            )
+
+            if already_listed:
+                # Forwarding a post the bot already has made a second
+                # listing (26527 beside 27027) that also took the first
+                # one's source link.
+                logging.info(
+                    "Forwarded source post already listed; skipped: "
+                    "property_id=%s channel_id=%s message_id=%s",
+                    already_listed,
+                    origin_chat.id,
+                    origin_message_id,
+                )
+                return
 
     has_media = bool(
         post.photo
