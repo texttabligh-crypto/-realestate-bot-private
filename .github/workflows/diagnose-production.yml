@@ -16,6 +16,10 @@ on:
         description: "Log window, e.g. 30m or 6h"
         type: string
         default: "60m"
+      unit_codes:
+        description: "Optional unit codes to inspect read-only, e.g. 3197,32536"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -44,14 +48,15 @@ jobs:
           SERVICE: ${{ inputs.service }}
           LINES: ${{ inputs.lines }}
           SINCE: ${{ inputs.since }}
+          UNIT_CODES: ${{ inputs.unit_codes }}
         run: |
           set -o pipefail
           report="${RUNNER_TEMP}/diagnose.txt"
 
           if sudo -n -l /usr/local/sbin/diagnose-realestate-bot >/dev/null 2>&1; then
-            sudo -n /usr/local/sbin/diagnose-realestate-bot "$SERVICE" "$LINES" "$SINCE" | tee "$report"
+            sudo -n /usr/local/sbin/diagnose-realestate-bot "$SERVICE" "$LINES" "$SINCE" "$UNIT_CODES" | tee "$report"
           elif docker info >/dev/null 2>&1; then
-            bash deploy/diagnose-realestate-bot "$SERVICE" "$LINES" "$SINCE" | tee "$report"
+            bash deploy/diagnose-realestate-bot "$SERVICE" "$LINES" "$SINCE" "$UNIT_CODES" | tee "$report"
           else
             echo "::error::Runner cannot read Docker. Install deploy/diagnose-realestate-bot as /usr/local/sbin/diagnose-realestate-bot with a NOPASSWD sudoers rule (see README)."
             exit 1
