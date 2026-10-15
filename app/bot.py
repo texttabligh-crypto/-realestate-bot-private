@@ -58,6 +58,10 @@ from duplicate_files import (
     DUPLICATE_FILES_ACTION,
     show_duplicate_files,
 )
+from instagram_story import (
+    INSTAGRAM_STORY_ACTION,
+    show_instagram_story,
+)
 from channel_file_editor import (
     ensure_channel_file_editor_schema,
     handle_file_editor_button,
@@ -13917,6 +13921,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == DUPLICATE_FILES_ACTION:
         await show_duplicate_files(query, source_public_post_exists)
+        return
+
+    if action == INSTAGRAM_STORY_ACTION:
+        await show_instagram_story(query, context.bot)
         return
 
     # CHANNEL_FILE_EDITOR_BUTTON_ROUTER_V1
