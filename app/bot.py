@@ -48,6 +48,12 @@ from crm_panel import (
     start_visit_reminder_worker,
 )
 
+from removed_files import (
+    REMOVED_FILES_ACTION,
+    ensure_removed_files_schema,
+    record_manual_removal,
+    show_removed_files,
+)
 from channel_file_editor import (
     ensure_channel_file_editor_schema,
     handle_file_editor_button,
@@ -9886,6 +9892,7 @@ async def post_init(application):
     ensure_showcase_schema()
     ensure_campaign_crm_schema()
     ensure_transcript_schema()
+    ensure_removed_files_schema()
     start_campaign_watch_worker(application)
     start_campaign_broadcast_worker(application)
     start_visit_reminder_worker(application)
@@ -12127,6 +12134,8 @@ async def retire_listing_kept_in_channel(
     categories and visits, and an owner removes the post by hand.
     """
 
+    record_manual_removal(property_id)
+
     deactivate_removed_property(
         property_id,
         "Source post deleted; channel post must be removed by hand",
@@ -12167,7 +12176,8 @@ def manual_channel_removal_messages(
         "🧹 این فایل‌ها از کانال منبع حذف شده‌اند ولی پستشان در کانال ما مانده.\n"
         "تلگرام اجازه نمی‌دهد ربات پست‌های قدیمی‌تر از ۴۸ ساعت را پاک کند؛ "
         "لطفاً این پست‌ها را خودتان از کانال حذف کنید.\n"
-        "ربات این فایل‌ها را از جستجو، دسته‌بندی‌ها و بازدید برداشت."
+        "ربات این فایل‌ها را از جستجو، دسته‌بندی‌ها و بازدید برداشت.\n"
+        "فهرست کامل: ⚙️ تنظیمات ← 🧹 فایل‌های حذف‌شده"
     )
 
     return [
@@ -13655,6 +13665,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 main_menu("ADMIN" if role == "OWNER" else role),
             ),
         )
+        return
+
+    if action == REMOVED_FILES_ACTION:
+        await show_removed_files(query, source_public_post_exists)
         return
 
     # CHANNEL_FILE_EDITOR_BUTTON_ROUTER_V1

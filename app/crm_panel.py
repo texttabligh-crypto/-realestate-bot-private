@@ -38,9 +38,10 @@ PERMISSION_LABELS = {
     "stats_team_view": "مشاهده آمار کل تیم",
     "reports_export": "دانلود PDF فایل‌های فعال",
     "channel_post_edit": "✏️ ویرایش فایل‌های منتشرشده کانال",
+    "removed_files_view": "🧹 فایل‌های حذف‌شده",
 }
 
-RESTRICTED_DEFAULT_OFF_KEYS = {"receive_visit_requests", "receive_visit_reminders", "reports_export", "channel_post_edit"}
+RESTRICTED_DEFAULT_OFF_KEYS = {"receive_visit_requests", "receive_visit_reminders", "reports_export", "channel_post_edit", "removed_files_view"}
 ADMIN_DEFAULTS = set(PERMISSION_LABELS) - RESTRICTED_DEFAULT_OFF_KEYS
 ADVISOR_DEFAULTS = {
     "smart_search",
@@ -64,6 +65,7 @@ ACTION_PERMISSIONS = [
     (("manual_",), "manual_property_add"),
     (("export_properties_pdf",), "reports_export"),
     (("channel_edit",), "channel_post_edit"),
+    (("removed_files",), "removed_files_view"),
 ]
 
 def db_connect():
@@ -6349,6 +6351,7 @@ def _menu_settings_hub_access(session):
             "stats_view",
             "schedule_manage",
             "customers_manage",
+            "removed_files_view",
         )
     )
 
@@ -6480,6 +6483,14 @@ def build_settings_menu(session, legacy_keyboard):
             InlineKeyboardButton(
                 "📊 گزارش CRM",
                 callback_data="crm_v2_report",
+            )
+        ])
+
+    if has_permission(session, "removed_files_view"):
+        hub_rows.append([
+            InlineKeyboardButton(
+                "🧹 فایل‌های حذف‌شده",
+                callback_data="removed_files",
             )
         ])
 
