@@ -7177,6 +7177,11 @@ def get_source_delete_watch_rows(limit=25):
     """
     Inspect recent SOURCE posts that are queued or already published.
     Least-recently checked rows are selected first so the watcher rotates.
+
+    A published listing whose primary source row was already deactivated
+    while the listing is still live (the cleanup was capped, interrupted
+    or failed after the source was marked deleted) is selected again, so
+    its channel post is removed on a later tick instead of staying forever.
     """
 
     with db_connect() as conn:
@@ -7194,13 +7199,15 @@ def get_source_delete_watch_rows(limit=25):
                   ON c.id = ps.source_channel_id
                 JOIN properties p
                   ON p.id = ps.property_id
-                WHERE ps.is_active = TRUE
-                  AND c.channel_type = 'SOURCE'
+                WHERE c.channel_type = 'SOURCE'
                   AND c.is_active = TRUE
                   AND c.username IS NOT NULL
                   AND BTRIM(c.username) <> ''
                   AND ps.source_message_id IS NOT NULL
                   AND (
+                    (
+                      ps.is_active = TRUE
+                      AND (
                         EXISTS (
                             SELECT 1
                             FROM publish_queue q
@@ -7230,6 +7237,23 @@ def get_source_delete_watch_rows(limit=25):
                             AND p.published_message_id IS NOT NULL
                             AND p.deleted_from_channel_at IS NULL
                         )
+                      )
+                    )
+                    OR (
+                      ps.is_active = FALSE
+                      AND ps.is_primary = TRUE
+                      AND p.status = 'ACTIVE'
+                      AND p.published_message_id IS NOT NULL
+                      AND p.deleted_from_channel_at IS NULL
+                      AND UPPER(COALESCE(p.source_kind, ''))
+                          NOT IN ('MANUAL', 'CUSTOMER')
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM property_sources live
+                          WHERE live.property_id = ps.property_id
+                            AND live.is_active = TRUE
+                      )
+                    )
                   )
                 ORDER BY ps.last_synced_at ASC NULLS FIRST, ps.id ASC
                 LIMIT %s
