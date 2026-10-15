@@ -39,9 +39,10 @@ PERMISSION_LABELS = {
     "reports_export": "دانلود PDF فایل‌های فعال",
     "channel_post_edit": "✏️ ویرایش فایل‌های منتشرشده کانال",
     "removed_files_view": "🧹 فایل‌های حذف‌شده",
+    "duplicate_files_view": "🔁 فایل‌های تکراری",
 }
 
-RESTRICTED_DEFAULT_OFF_KEYS = {"receive_visit_requests", "receive_visit_reminders", "reports_export", "channel_post_edit", "removed_files_view"}
+RESTRICTED_DEFAULT_OFF_KEYS = {"receive_visit_requests", "receive_visit_reminders", "reports_export", "channel_post_edit", "removed_files_view", "duplicate_files_view"}
 ADMIN_DEFAULTS = set(PERMISSION_LABELS) - RESTRICTED_DEFAULT_OFF_KEYS
 ADVISOR_DEFAULTS = {
     "smart_search",
@@ -66,6 +67,7 @@ ACTION_PERMISSIONS = [
     (("export_properties_pdf",), "reports_export"),
     (("channel_edit",), "channel_post_edit"),
     (("removed_files",), "removed_files_view"),
+    (("duplicate_files",), "duplicate_files_view"),
 ]
 
 def db_connect():
@@ -6352,6 +6354,7 @@ def _menu_settings_hub_access(session):
             "schedule_manage",
             "customers_manage",
             "removed_files_view",
+            "duplicate_files_view",
         )
     )
 
@@ -6486,13 +6489,23 @@ def build_settings_menu(session, legacy_keyboard):
             )
         ])
 
+    cleanup_row = []
     if has_permission(session, "removed_files_view"):
-        hub_rows.append([
+        cleanup_row.append(
             InlineKeyboardButton(
                 "🧹 فایل‌های حذف‌شده",
                 callback_data="removed_files",
             )
-        ])
+        )
+    if has_permission(session, "duplicate_files_view"):
+        cleanup_row.append(
+            InlineKeyboardButton(
+                "🔁 فایل‌های تکراری",
+                callback_data="duplicate_files",
+            )
+        )
+    if cleanup_row:
+        hub_rows.append(cleanup_row)
 
     if is_owner(session):
         hub_rows.append([
