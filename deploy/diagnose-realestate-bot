@@ -13,6 +13,9 @@ ALL_CONTAINERS=(realestate_bot realestate_partner_hub realestate_postgres reales
 SERVICE="${1:-all}"
 LINES="${2:-200}"
 SINCE="${3:-60m}"
+# Optional: up to 10 published unit codes, e.g. 3197,32536. Shows those
+# listings' stored data read-only; customer tables are never queried.
+UNIT_CODES="${4:-}"
 
 case "${SERVICE}" in
     all) LOG_CONTAINERS=(realestate_bot realestate_partner_hub) ;;
@@ -30,6 +33,11 @@ fi
 
 if ! [[ "${SINCE}" =~ ^[0-9]{1,4}[mh]$ ]]; then
     echo "ERROR: since must look like 30m or 6h"
+    exit 2
+fi
+
+if test -n "${UNIT_CODES}" && ! [[ "${UNIT_CODES}" =~ ^[0-9]{1,12}(,[0-9]{1,12}){0,9}$ ]]; then
+    echo "ERROR: unit codes must be up to 10 numbers separated by commas"
     exit 2
 fi
 
@@ -99,6 +107,97 @@ for container in "${LOG_CONTAINERS[@]}"; do
     section "LOGS ${container} (since ${SINCE}, last ${LINES} lines)"
     docker logs --since "${SINCE}" --tail "${LINES}" "${container}" 2>&1 | redact || true
 done
+
+# Listing lookup on a read-only session (every statement runs in a read-only
+# transaction), property tables only; nothing is created, not even a temporary
+# view. Each query runs on its own so one failure can't hide the rest.
+listing_lookup() {
+    docker exec -i \
+        -e PGOPTIONS='-c default_transaction_read_only=on -c statement_timeout=15000' \
+        realestate_postgres \
+        sh -c 'exec psql -X -q -A -F " | " -P pager=off -P footer=off \
+            -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v codes="$1"' sh "${UNIT_CODES}" <<'SQL'
+\echo
+\echo ----- PROPERTY -----
+WITH wanted AS (SELECT * FROM properties WHERE unit_code = ANY (string_to_array(:'codes', ',')))
+SELECT id, unit_code, status, source_kind, ingest_status, has_media,
+       input_channel_id, input_message_id, input_media_group_id,
+       published_message_id, deleted_from_channel_at, created_at, published_at,
+       area_m2, bedrooms, floor_text, build_year, district, address_text,
+       direction, has_parking, has_elevator, has_storage, current_price_billion
+FROM wanted ORDER BY id;
+\echo
+\echo ----- RAW TEXT -----
+WITH wanted AS (SELECT * FROM properties WHERE unit_code = ANY (string_to_array(:'codes', ',')))
+SELECT id, unit_code, replace(left(raw_text, 2000), E'\n', ' ⏎ ') AS raw_text
+FROM wanted ORDER BY id;
+\echo
+\echo ----- SOURCES -----
+WITH wanted AS (SELECT * FROM properties WHERE unit_code = ANY (string_to_array(:'codes', ',')))
+SELECT ps.property_id, ps.id, c.username AS channel, c.telegram_channel_id,
+       ps.source_message_id, ps.source_unit_code, ps.is_primary, ps.is_active,
+       ps.source_post_url, ps.created_at, ps.updated_at,
+       replace(left(ps.source_raw_text, 2000), E'\n', ' ⏎ ') AS source_raw_text
+FROM property_sources ps
+JOIN wanted w ON w.id = ps.property_id
+LEFT JOIN channels c ON c.id = ps.source_channel_id
+ORDER BY ps.property_id, ps.id;
+\echo
+\echo ----- ATTRIBUTES -----
+WITH wanted AS (SELECT * FROM properties WHERE unit_code = ANY (string_to_array(:'codes', ',')))
+SELECT pa.property_id, pa.attribute_key, pa.attribute_label, pa.attribute_value,
+       pa.display_order
+FROM property_attributes pa
+JOIN wanted w ON w.id = pa.property_id
+ORDER BY pa.property_id, pa.display_order, pa.attribute_key;
+\echo
+\echo ----- MEDIA -----
+WITH wanted AS (SELECT * FROM properties WHERE unit_code = ANY (string_to_array(:'codes', ',')))
+SELECT pm.property_id, pm.id, pm.media_type, pm.media_group_id, pm.position,
+       pm.created_at, pm.telegram_file_unique_id
+FROM property_media pm
+JOIN wanted w ON w.id = pm.property_id
+ORDER BY pm.property_id, pm.position, pm.id;
+\echo
+\echo ----- SAME PHOTO ON OTHER LISTINGS -----
+WITH wanted AS (SELECT * FROM properties WHERE unit_code = ANY (string_to_array(:'codes', ',')))
+SELECT pm.property_id, w.unit_code, other.property_id AS other_property_id,
+       op.unit_code AS other_unit_code, op.input_channel_id AS other_channel,
+       op.input_message_id AS other_message, other.telegram_file_unique_id
+FROM property_media pm
+JOIN wanted w ON w.id = pm.property_id
+JOIN property_media other
+  ON other.telegram_file_unique_id = pm.telegram_file_unique_id
+ AND other.property_id <> pm.property_id
+JOIN properties op ON op.id = other.property_id
+ORDER BY pm.property_id, other.property_id;
+\echo
+\echo ----- DUPLICATE REVIEWS -----
+WITH wanted AS (SELECT * FROM properties WHERE unit_code = ANY (string_to_array(:'codes', ',')))
+SELECT dr.property_id, p1.unit_code, dr.duplicate_of_property_id,
+       p2.unit_code AS duplicate_of_unit_code, dr.similarity_score,
+       dr.review_status, dr.match_reason
+FROM duplicate_reviews dr
+LEFT JOIN properties p1 ON p1.id = dr.property_id
+LEFT JOIN properties p2 ON p2.id = dr.duplicate_of_property_id
+WHERE dr.property_id IN (SELECT id FROM wanted)
+   OR dr.duplicate_of_property_id IN (SELECT id FROM wanted)
+ORDER BY dr.property_id;
+\echo
+\echo ----- PUBLISH QUEUE -----
+WITH wanted AS (SELECT * FROM properties WHERE unit_code = ANY (string_to_array(:'codes', ',')))
+SELECT q.property_id, q.queue_status, q.scheduled_for, q.published_at,
+       q.attempts, q.last_error
+FROM publish_queue q
+JOIN wanted w ON w.id = q.property_id
+ORDER BY q.property_id, q.id;
+SQL
+}
+
+if test -n "${UNIT_CODES}"; then
+    section "LISTINGS ${UNIT_CODES} (read-only)"
+    listing_lookup 2>&1 | redact || true
+fi
 
 section "DONE"
 echo "DIAGNOSE_COMPLETE"
