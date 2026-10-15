@@ -1869,6 +1869,13 @@ async def handle_customer_text(update, context):
     # It intentionally does not destroy an in-progress visit/seller conversation.
     normalized_text = normalize_digits(text).strip()
 
+    # A number typed after a «درخواست بازدید» link completes that request,
+    # like the share-contact button does.
+    if state == "IDLE":
+        from visit_flow import handle_visit_phone_text
+        if await handle_visit_phone_text(update, context):
+            return True
+
     # Global natural-language escape hatch for an in-progress form.
     # Example: «نه اونو تموم کن» while a seller form is waiting for an address.
     if state != "IDLE" and _is_flow_cancel_request(text):

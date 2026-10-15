@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from telegram import (
     InlineKeyboardButton,
@@ -775,8 +776,83 @@ async def handle_visit_start(
 
     await update.effective_message.reply_text(
         "لطفاً برای ثبت درخواست بازدید، شماره تماس خودتون رو "
-        "از طریق دکمه زیر ارسال کنید.",
+        "از طریق دکمه زیر ارسال کنید یا شماره موبایل‌تون رو بنویسید.\n"
+        "مثال: 09121234567",
         reply_markup=_phone_keyboard(),
+    )
+
+    return True
+
+
+_MOBILE_IN_TEXT = re.compile(r"(?<!\d)(?:\+?98|0098|0)?9\d{9}(?!\d)")
+
+
+def typed_mobile_number(text):
+    """The one mobile number a short message carries (09xxxxxxxxx), or None."""
+    raw = str(text or "").translate(
+        str.maketrans(
+            "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
+            "01234567890123456789",
+        )
+    )
+    if len(raw) > 60:
+        return None
+    # «0914 413 9040» and «0914-413-9040» are one number.
+    raw = re.sub(r"(?<=\d)[ \t\-]+(?=\d)", "", raw)
+    numbers = _MOBILE_IN_TEXT.findall(raw)
+    if len(numbers) != 1:
+        return None
+    phone = normalize_iran_phone(numbers[0])
+    return phone if re.fullmatch(r"09\d{9}", phone) else None
+
+
+async def handle_visit_phone_text(
+    update,
+    context,
+):
+    """A typed mobile number completes a waiting visit request.
+
+    Many customers type their number instead of pressing «ارسال شماره تماس
+    من»; without this the number went to an advisor as a question and the
+    visit request was never sent.
+    """
+    user = update.effective_user
+    message = update.effective_message
+
+    if not user or not message:
+        return False
+
+    phone = typed_mobile_number(
+        message.text
+    )
+
+    if not phone:
+        return False
+
+    customer = get_customer_by_telegram_id(
+        user.id
+    )
+
+    if not customer:
+        return False
+
+    pending = get_pending_visit(
+        customer[0]
+    )
+
+    if not pending:
+        return False
+
+    save_customer_phone(
+        telegram_user_id=user.id,
+        phone_number=phone,
+    )
+
+    await _complete_visit_request(
+        update,
+        context,
+        customer_id=customer[0],
+        property_id=pending[2],
     )
 
     return True
