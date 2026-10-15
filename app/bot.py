@@ -9784,11 +9784,15 @@ def reconnect_untracked_source_listings():
     back when its current holder is no longer live; otherwise a row for the
     listing's own first source message is added. Rows start unchecked so the
     source watcher looks at them first.
+
+    A listing whose post another live listing already holds is a copy of
+    it; those pairs are returned as (unit_code, published_message_id,
+    holder_unit_code, holder_published_message_id) for an owner to review.
     """
 
     restored = []
     created = []
-    skipped = []
+    duplicates = []
 
     with db_connect() as conn:
         with conn.cursor() as cur:
@@ -9799,6 +9803,8 @@ def reconnect_untracked_source_listings():
                     c.id,
                     p.input_message_id,
                     p.raw_text,
+                    p.unit_code,
+                    p.published_message_id,
                     COALESCE(
                         ARRAY_AGG(pm.position)
                             FILTER (WHERE pm.position IS NOT NULL),
@@ -9830,6 +9836,8 @@ def reconnect_untracked_source_listings():
                 channel_db_id,
                 input_message_id,
                 raw_text,
+                unit_code,
+                published_message_id,
                 positions,
             ) in listings:
                 message_ids = sorted(
@@ -9899,29 +9907,56 @@ def reconnect_untracked_source_listings():
 
                 if cur.fetchone():
                     created.append(property_id)
-                else:
-                    # Another live listing holds that post: a real
-                    # duplicate pair, left for the duplicate review.
-                    skipped.append(property_id)
+                    continue
+
+                # Another live listing holds that post: the same file was
+                # listed twice. Left for an owner to review.
+                cur.execute(
+                    """
+                    SELECT holder.unit_code, holder.published_message_id
+                    FROM property_sources ps
+                    JOIN properties holder
+                      ON holder.id = ps.property_id
+                    WHERE ps.source_channel_id = %s
+                      AND ps.source_message_id = %s
+                    """,
+                    (channel_db_id, input_message_id),
+                )
+                holder = cur.fetchone() or (None, None)
+                duplicates.append(
+                    (unit_code, published_message_id) + tuple(holder)
+                )
 
         conn.commit()
 
-    return restored, created, skipped
+    return restored, created, duplicates
 
 
 async def delayed_untracked_source_repair(application):
     await asyncio.sleep(UNTRACKED_SOURCE_REPAIR_STARTUP_DELAY_SECONDS)
     try:
-        restored, created, skipped = await asyncio.to_thread(
+        restored, created, duplicates = await asyncio.to_thread(
             reconnect_untracked_source_listings
         )
         logging.info(
             "UNTRACKED source repair completed: restored=%s created=%s "
-            "skipped=%s",
+            "duplicates=%s",
             restored,
             created,
-            skipped,
+            len(duplicates),
         )
+        destination = get_destination_channel()
+        username = destination[2] if destination else None
+        for unit_code, message_id, holder_code, holder_message_id in duplicates:
+            logging.info(
+                "DUPLICATE listing: unit_code=%s url=%s same source post as "
+                "unit_code=%s url=%s",
+                unit_code,
+                build_channel_post_url(username, message_id),
+                holder_code,
+                build_channel_post_url(username, holder_message_id)
+                or "not published",
+            )
     except asyncio.CancelledError:
         raise
     except Exception:
