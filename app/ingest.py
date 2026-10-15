@@ -813,6 +813,10 @@ def _save_property_source_raw(
     with db_connect() as conn:
         with conn.cursor() as cur:
             if source_unit_code:
+                # Only this listing's own row may follow the code to a new
+                # message. Sources reuse codes for other units, and taking
+                # another listing's row left that listing untracked and let
+                # later edits of the new post rewrite the wrong listing.
                 cur.execute(
                     """
                     UPDATE property_sources
@@ -831,6 +835,7 @@ def _save_property_source_raw(
                         FROM property_sources
                         WHERE source_channel_id = %s
                           AND source_unit_code = %s
+                          AND property_id = %s
                         ORDER BY
                             is_active DESC,
                             is_primary DESC,
@@ -847,6 +852,7 @@ def _save_property_source_raw(
                         source_post_url,
                         channel_db_id,
                         source_unit_code,
+                        property_id,
                     ),
                 )
 

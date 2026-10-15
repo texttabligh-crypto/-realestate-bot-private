@@ -9502,6 +9502,190 @@ def start_inline_feature_repair(application):
     return task
 
 
+# === CATALOG HIJACK REPAIR V1 ===
+CATALOG_HIJACK_REPAIR_STARTUP_DELAY_SECONDS = 130
+
+
+def _catalog_hijack_rows():
+    """Published source listings whose source row tracks another post."""
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    p.id,
+                    p.unit_code,
+                    p.raw_text,
+                    p.input_channel_id,
+                    p.input_message_id,
+                    c.username,
+                    ps.source_message_id,
+                    ps.source_unit_code,
+                    ps.source_raw_text
+                FROM properties p
+                JOIN property_sources ps
+                  ON ps.property_id = p.id
+                 AND ps.is_active = TRUE
+                 AND ps.is_primary = TRUE
+                JOIN channels c
+                  ON c.id = ps.source_channel_id
+                WHERE p.status = 'ACTIVE'
+                  AND p.source_kind = 'SOURCE'
+                  AND p.published_message_id IS NOT NULL
+                  AND p.deleted_from_channel_at IS NULL
+                  AND c.telegram_channel_id = p.input_channel_id
+                  AND ps.source_message_id <> p.input_message_id
+                ORDER BY p.id
+                """
+            )
+            return cur.fetchall()
+
+
+def catalog_hijacked_listing(own_text, source_text, source_code):
+    """The listing's own parse when a catalog post took over its source.
+
+    Its photos came with its own post; a catalog of other units that reused
+    its code was then applied to it. Anything less certain is left alone.
+    """
+    if not own_text or not source_code:
+        return None
+    if not split_listing_blocks(source_text or ""):
+        return None
+    if split_listing_blocks(own_text):
+        return None
+    if parse_source_unit_code(own_text) != source_code:
+        return None
+    parsed = parse_property(own_text)
+    if parsed.get("current_price_toman") is None:
+        return None
+    return parsed
+
+
+def _replace_all_attributes(property_id, attributes):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM property_attributes WHERE property_id = %s",
+                (property_id,),
+            )
+        conn.commit()
+    save_property_attributes(property_id, attributes)
+
+
+def _pending_duplicates_of(property_id):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT property_id
+                FROM duplicate_reviews
+                WHERE duplicate_of_property_id = %s
+                  AND review_status = 'PENDING'
+                ORDER BY property_id
+                """,
+                (property_id,),
+            )
+            return [int(row[0]) for row in cur.fetchall()]
+
+
+async def restore_catalog_hijacked_listings(application):
+    rules = get_active_attribute_rules()
+    restored = []
+    rows = _catalog_hijack_rows()
+    for (
+        property_id,
+        unit_code,
+        raw_text,
+        channel_id,
+        channel_username,
+        message_id,
+        hijack_message_id,
+        source_code,
+        source_text,
+    ) in rows:
+        parsed = catalog_hijacked_listing(raw_text, source_text, source_code)
+        if parsed is None:
+            continue
+
+        old_price = _get_property_current_price_toman(property_id)
+        old_regions = _get_property_region_category_names(property_id)
+
+        update_parsed_property(property_id, parsed)
+        save_property_address(property_id, parsed.get("address_text"))
+        merged = {}
+        for item in parse_dynamic_attributes(raw_text) + parse_rule_attributes(raw_text, rules):
+            merged[item["attribute_key"]] = item
+        _replace_all_attributes(property_id, list(merged.values()))
+        # Track the listing's own post again, so its deletion is noticed.
+        save_property_source(
+            property_id=property_id,
+            telegram_channel_id=channel_id,
+            source_message_id=message_id,
+            source_unit_code=source_code,
+            source_raw_text=raw_text,
+            source_price_toman=parsed.get("current_price_toman"),
+            source_post_url=build_source_post_url(channel_id, channel_username, message_id),
+        )
+
+        released = []
+        for duplicate_id in _pending_duplicates_of(property_id):
+            if not detect_and_store_duplicate(duplicate_id):
+                released.append(duplicate_id)
+
+        restored.append(int(property_id))
+        logging.warning(
+            "CATALOG_HIJACK_RESTORED property_id=%s unit_code=%s source_message=%s->%s "
+            "price=%s released_duplicates=%s",
+            property_id,
+            unit_code,
+            hijack_message_id,
+            message_id,
+            parsed.get("current_price_billion"),
+            released,
+        )
+        try:
+            await refresh_published_property_post(application.bot, property_id)
+            await sync_categories_for_price_change(
+                application.bot,
+                property_id,
+                old_price,
+                _get_property_current_price_toman(property_id),
+                extra_region_names=old_regions,
+            )
+        except Exception:
+            logging.exception("Catalog hijack repair refresh failed: property_id=%s", property_id)
+        await asyncio.sleep(AREA_REPAIR_EDIT_SPACING_SECONDS)
+
+    logging.info(
+        "CATALOG hijack repair completed: checked=%s restored=%s property_ids=%s",
+        len(rows),
+        len(restored),
+        restored,
+    )
+
+
+async def delayed_catalog_hijack_repair(application):
+    await asyncio.sleep(CATALOG_HIJACK_REPAIR_STARTUP_DELAY_SECONDS)
+    try:
+        await restore_catalog_hijacked_listings(application)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.exception("Catalog hijack repair failed")
+
+
+def start_catalog_hijack_repair(application):
+    existing = application.bot_data.get("catalog_hijack_repair_task")
+    if existing and not existing.done():
+        return existing
+    task = asyncio.create_task(
+        delayed_catalog_hijack_repair(application),
+        name="catalog_hijack_repair",
+    )
+    application.bot_data["catalog_hijack_repair_task"] = task
+    return task
+
+
 def start_extended_source_location_repair(application):
     existing = application.bot_data.get(
         "extended_source_location_repair_task"
@@ -9630,6 +9814,7 @@ async def post_init(application):
     start_misparsed_area_repair(application)
     start_promotional_detail_cleanup(application)
     start_inline_feature_repair(application)
+    start_catalog_hijack_repair(application)
     start_category_reconcile(application)
 
     # Let startup workers emit their immediate errors first, then place
@@ -11304,7 +11489,9 @@ def find_property_for_source_sync(
                     return row[0]
 
             # 2) Fallback:
-            # source code inside the same source channel.
+            # source code inside the same source channel, only for rows
+            # saved without a message ID. A row tracking another message is
+            # another post, and sources reuse codes for other units.
             if source_unit_code:
                 cur.execute(
                     """
@@ -11314,6 +11501,7 @@ def find_property_for_source_sync(
                       ON p.id = ps.property_id
                     WHERE ps.source_channel_id = %s
                       AND ps.source_unit_code = %s
+                      AND ps.source_message_id IS NULL
                       AND ps.is_active = TRUE
                     ORDER BY
                         ps.is_primary DESC,
