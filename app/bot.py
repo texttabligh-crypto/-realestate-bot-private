@@ -60,7 +60,9 @@ from duplicate_files import (
 )
 from instagram_story import (
     INSTAGRAM_STORY_ACTION,
-    show_instagram_story,
+    INSTAGRAM_STORY_COUNT_STATE,
+    handle_instagram_story_button,
+    handle_instagram_story_count_text,
 )
 from channel_file_editor import (
     ensure_channel_file_editor_schema,
@@ -10310,6 +10312,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = context.user_data.get("state")
 
+    if state == INSTAGRAM_STORY_COUNT_STATE:
+        await handle_instagram_story_count_text(
+            update,
+            context,
+            allowed=check_action_access(session, INSTAGRAM_STORY_ACTION),
+        )
+        return
+
     # CHANNEL_FILE_EDITOR_TEXT_ROUTER_V1
     if await handle_file_editor_text(
         update,
@@ -13923,8 +13933,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_duplicate_files(query, source_public_post_exists)
         return
 
-    if action == INSTAGRAM_STORY_ACTION:
-        await show_instagram_story(query, context.bot)
+    if action == INSTAGRAM_STORY_ACTION or action.startswith(f"{INSTAGRAM_STORY_ACTION}_"):
+        await handle_instagram_story_button(query, context)
         return
 
     # CHANNEL_FILE_EDITOR_BUTTON_ROUTER_V1
