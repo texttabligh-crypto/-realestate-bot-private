@@ -53,14 +53,17 @@ INSERT INTO properties VALUES
     (400, 'ACTIVE', 'SOURCE', 'no stale row', -1002017017266, 9600, 1500, NULL),
     (401, 'ACTIVE', 'SOURCE', 'live duplicate', -1002017017266, 9700, 1501, NULL),
     (402, 'ACTIVE', 'SOURCE', 'holds 9700', -1002017017266, 9701, 1502, NULL),
-    (404, 'ACTIVE', 'INPUT', 'origin unknown', -1004370416481, 1300, 1504, NULL);
+    (404, 'ACTIVE', 'INPUT', 'origin unknown', -1004370416481, 1300, 1504, NULL),
+    (405, 'ACTIVE', 'SOURCE', 'published, row taken', -1002017017266, 9900, 1505, NULL),
+    (406, 'ACTIVE', 'SOURCE', 'unpublished copy', -1002017017266, 9901, NULL, NULL);
 UPDATE properties SET unit_code = (id * 100)::text;
 INSERT INTO property_media SELECT 287, g FROM generate_series(740, 747) g;
 INSERT INTO property_sources (id, property_id, source_channel_id, source_message_id,
                               source_unit_code, is_primary, is_active, last_synced_at) VALUES
     (244, 289, 1, 747, '123456', TRUE, FALSE, NOW()),
     (251, 292, 3, 9507, NULL, TRUE, TRUE, NOW()),
-    (500, 402, 3, 9700, NULL, TRUE, TRUE, NOW());
+    (500, 402, 3, 9700, NULL, TRUE, TRUE, NOW()),
+    (501, 406, 3, 9900, NULL, TRUE, TRUE, NOW());
 """
 
 
@@ -97,10 +100,12 @@ class UntrackedSourceDatabaseTest(unittest.TestCase):
         ns = load("bot.py", {"reconnect_untracked_source_listings"}, {"db_connect": self.connect})
         restored, created, duplicates = ns["reconnect_untracked_source_listings"]()
         pair = ("40100", 1501, "40200", 1502)
-        self.assertEqual((restored, created, duplicates), ([287], [400], [pair]))
+        self.assertEqual((restored, created, duplicates), ([287, 405], [400], [pair]))
         rows = self.rows()
         self.assertEqual(rows[244], (287, 747, True, True))
         self.assertEqual(rows[500][0], 402)
+        # An unpublished copy waiting in the queue gives the row back.
+        self.assertEqual(rows[501], (405, 9900, True, True))
         self.assertEqual(ns["reconnect_untracked_source_listings"](), ([], [], [pair]))
 
     def test_forwarded_copy_does_not_take_the_row(self):
@@ -124,6 +129,11 @@ class UntrackedSourceDatabaseTest(unittest.TestCase):
         # ... but once its holder is gone the row may follow the post.
         ns["_save_property_source_raw"](600, -1003466235066, 747, None, "copy")
         self.assertEqual(self.rows()[244][0], 600)
+        # An unpublished holder never keeps the row from a published listing.
+        ns["_save_property_source_raw"](405, -1002017017266, 9900, None, "own")
+        self.assertEqual(self.rows()[501][0], 405)
+        ns["_save_property_source_raw"](406, -1002017017266, 9900, None, "copy")
+        self.assertEqual(self.rows()[501][0], 405)
 
 
 if __name__ == "__main__":

@@ -9785,7 +9785,8 @@ def reconnect_untracked_source_listings():
     A forwarded copy of a post used to take the source row from the listing
     that already tracked it (27027 lost it to 26527), so the bot stopped
     noticing when the source edited or deleted that post. The row is moved
-    back when its current holder is no longer live; otherwise a row for the
+    back when its current holder is no longer live or was never published
+    (an unpublished copy waiting in the queue); otherwise a row for the
     listing's own first source message is added. Rows start unchecked so the
     source watcher looks at them first.
 
@@ -9868,6 +9869,7 @@ def reconnect_untracked_source_listings():
                           AND (
                                 holder.status <> 'ACTIVE'
                                 OR holder.deleted_from_channel_at IS NOT NULL
+                                OR holder.published_message_id IS NULL
                           )
                         ORDER BY ps.id
                         LIMIT 1
