@@ -797,6 +797,49 @@ def get_channel_db_id(telegram_channel_id):
             return row[0] if row else None
 
 
+def live_property_for_source_post(
+    telegram_channel_id,
+    source_message_id,
+):
+    """The live listing that already holds this source post, if any."""
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.id
+                FROM properties p
+                JOIN channels c
+                  ON c.telegram_channel_id = %s
+                WHERE p.status = 'ACTIVE'
+                  AND p.deleted_from_channel_at IS NULL
+                  AND (
+                        EXISTS (
+                            SELECT 1
+                            FROM property_sources ps
+                            WHERE ps.property_id = p.id
+                              AND ps.source_channel_id = c.id
+                              AND ps.source_message_id = %s
+                        )
+                        OR (
+                            p.input_channel_id = c.telegram_channel_id
+                            AND p.input_message_id = %s
+                        )
+                  )
+                ORDER BY p.id
+                LIMIT 1
+                """,
+                (
+                    telegram_channel_id,
+                    source_message_id,
+                    source_message_id,
+                ),
+            )
+            row = cur.fetchone()
+
+    return row[0] if row else None
+
+
 def _save_property_source_raw(
     property_id,
     telegram_channel_id,
@@ -915,7 +958,20 @@ def _save_property_source_raw(
                     source_message_id
                 )
                 DO UPDATE SET
-                    property_id = EXCLUDED.property_id,
+                    -- A post forwarded again (e.g. into the input channel)
+                    -- must not take the row from the live listing that
+                    -- already tracks it; that left the listing untracked.
+                    property_id = CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM properties owner
+                            WHERE owner.id = property_sources.property_id
+                              AND owner.id <> EXCLUDED.property_id
+                              AND owner.status = 'ACTIVE'
+                        )
+                        THEN property_sources.property_id
+                        ELSE EXCLUDED.property_id
+                    END,
                     source_unit_code = EXCLUDED.source_unit_code,
                     source_price_toman = EXCLUDED.source_price_toman,
                     source_raw_text = EXCLUDED.source_raw_text,
