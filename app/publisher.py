@@ -397,6 +397,10 @@ def build_publish_text(row, unit_code=None, dynamic_attributes_override=None):
         else get_property_attributes(property_id)
     )
 
+    # An admin rule and the parser can both find «تعداد واحد در طبقه: ۴»;
+    # show a detail line once.
+    attribute_lines_before = len(lines)
+
     for (
         attribute_key,
         attribute_label,
@@ -433,6 +437,9 @@ def build_publish_text(row, unit_code=None, dynamic_attributes_override=None):
                 f"{settings['emoji_unknown']} "
                 f"{attribute_label}: {attribute_value}"
             )
+
+        if lines[-1] in lines[attribute_lines_before:-1]:
+            lines.pop()
 
     if has_parking is True:
         lines.append(
