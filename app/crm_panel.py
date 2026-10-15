@@ -40,9 +40,10 @@ PERMISSION_LABELS = {
     "channel_post_edit": "✏️ ویرایش فایل‌های منتشرشده کانال",
     "removed_files_view": "🧹 فایل‌های حذف‌شده",
     "duplicate_files_view": "🔁 فایل‌های تکراری",
+    "instagram_story": "📸 ساخت استوری اینستاگرام",
 }
 
-RESTRICTED_DEFAULT_OFF_KEYS = {"receive_visit_requests", "receive_visit_reminders", "reports_export", "channel_post_edit", "removed_files_view", "duplicate_files_view"}
+RESTRICTED_DEFAULT_OFF_KEYS = {"receive_visit_requests", "receive_visit_reminders", "reports_export", "channel_post_edit", "removed_files_view", "duplicate_files_view", "instagram_story"}
 ADMIN_DEFAULTS = set(PERMISSION_LABELS) - RESTRICTED_DEFAULT_OFF_KEYS
 ADVISOR_DEFAULTS = {
     "smart_search",
@@ -68,6 +69,7 @@ ACTION_PERMISSIONS = [
     (("channel_edit",), "channel_post_edit"),
     (("removed_files",), "removed_files_view"),
     (("duplicate_files",), "duplicate_files_view"),
+    (("insta_story",), "instagram_story"),
 ]
 
 def db_connect():
@@ -6355,6 +6357,7 @@ def _menu_settings_hub_access(session):
             "customers_manage",
             "removed_files_view",
             "duplicate_files_view",
+            "instagram_story",
         )
     )
 
@@ -6506,6 +6509,14 @@ def build_settings_menu(session, legacy_keyboard):
         )
     if cleanup_row:
         hub_rows.append(cleanup_row)
+
+    if has_permission(session, "instagram_story"):
+        hub_rows.append([
+            InlineKeyboardButton(
+                "📸 استوری اینستاگرام",
+                callback_data="insta_story",
+            )
+        ])
 
     if is_owner(session):
         hub_rows.append([
