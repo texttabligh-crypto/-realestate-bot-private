@@ -13,6 +13,7 @@ from telegram import (
 )
 
 from publisher import (
+    build_channel_post_url,
     build_publish_text,
     get_destination_channel,
     get_property_for_publish,
@@ -127,7 +128,24 @@ def _format_price(detail):
     return "ثبت نشده"
 
 
-def _build_operator_lead_text(detail):
+CHANNEL_POST_BUTTON_TEXT = "📢 مشاهده فایل در کانال ما"
+
+
+def _our_channel_post_url(property_data, destination):
+    """Link to the listing's post in our own channel, if it is still live."""
+    if not property_data or not property_data[10]:
+        return None
+
+    return (
+        build_channel_post_url(
+            destination[2] if destination else None,
+            property_data[10],
+        )
+        or property_data[9]
+    )
+
+
+def _build_operator_lead_text(detail, channel_post_url=None):
     request_id = detail[0]
     property_id = detail[2]
     unit_code = detail[3] or "-"
@@ -165,8 +183,16 @@ def _build_operator_lead_text(detail):
         "",
         f"🆔 شماره درخواست: {request_id}",
         f"🔢 کد واحد: {unit_code}",
-        f"📍 موقعیت: {address}",
     ]
+
+    if channel_post_url:
+        lines.append(
+            f"📢 فایل در کانال ما: {channel_post_url}"
+        )
+
+    lines.append(
+        f"📍 موقعیت: {address}"
+    )
 
     if area is not None:
         lines.append(
@@ -263,6 +289,7 @@ def _build_operator_lead_text(detail):
 
 def _build_operator_source_keyboard(
     property_id: int,
+    channel_post_url=None,
 ):
     source = get_operator_source_context(
         property_id
@@ -297,9 +324,20 @@ def _build_operator_source_keyboard(
             ),
         )
 
-    return InlineKeyboardMarkup(
-        [[button]]
-    )
+    rows = [[button]]
+
+    if channel_post_url:
+        rows.insert(
+            0,
+            [
+                InlineKeyboardButton(
+                    CHANNEL_POST_BUTTON_TEXT,
+                    url=channel_post_url,
+                )
+            ],
+        )
+
+    return InlineKeyboardMarkup(rows)
 
 
 async def handle_visit_source_callback(
@@ -357,18 +395,34 @@ async def handle_visit_source_callback(
         source_is_active
         and direct_url
     ):
+        rows = [
+            [
+                InlineKeyboardButton(
+                    "🔗 مشاهده پست اصلی منبع",
+                    url=direct_url,
+                )
+            ]
+        ]
+
+        channel_post_url = _our_channel_post_url(
+            get_visitable_property(property_id),
+            get_destination_channel(),
+        )
+
+        if channel_post_url:
+            rows.insert(
+                0,
+                [
+                    InlineKeyboardButton(
+                        CHANNEL_POST_BUTTON_TEXT,
+                        url=channel_post_url,
+                    )
+                ],
+            )
+
         try:
             await query.edit_message_reply_markup(
-                reply_markup=InlineKeyboardMarkup(
-                    [
-                        [
-                            InlineKeyboardButton(
-                                "🔗 مشاهده پست اصلی منبع",
-                                url=direct_url,
-                            )
-                        ]
-                    ]
-                )
+                reply_markup=InlineKeyboardMarkup(rows)
             )
 
             await query.answer(
@@ -458,6 +512,7 @@ async def _notify_visit_operators(
     )
 
     published_message_id = None
+    property_data = None
 
     if property_id:
         property_data = (
@@ -471,9 +526,15 @@ async def _notify_visit_operators(
                 property_data[10]
             )
 
+    channel_post_url = _our_channel_post_url(
+        property_data,
+        destination,
+    )
+
     lead_text = (
         _build_operator_lead_text(
-            detail
+            detail,
+            channel_post_url,
         )
     )
 
@@ -487,7 +548,8 @@ async def _notify_visit_operators(
                 disable_web_page_preview=True,
                 reply_markup=(
                     _build_operator_source_keyboard(
-                        property_id
+                        property_id,
+                        channel_post_url,
                     )
                     if property_id
                     else None
