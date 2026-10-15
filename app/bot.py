@@ -11140,6 +11140,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             source_code
         )
 
+        if not rows and re.search(r"t\.me/", source_code, re.IGNORECASE):
+            # The bot only sees source posts published after it joined
+            # that channel; older posts reach it when forwarded to INPUT.
+            await update.message.reply_text(
+                "❌ این پست بین فایل‌های فعال ربات نیست.\n\n"
+                "ربات فقط پست‌هایی را می‌گیرد که بعد از ادمین شدنش در کانال "
+                "منبع منتشر شده‌اند. اگر این پست قدیمی‌تر است، همان پست را در "
+                "«کانال ورودی» فوروارد کنید تا ربات ثبتش کند، بعد دوباره "
+                "«انتشار فوری» را بزنید و لینک را بفرستید.",
+                reply_markup=back_menu(),
+                disable_web_page_preview=True,
+            )
+            return
+
         if not rows:
             await update.message.reply_text(
                 "❌ فایل پیدا نشد.\n\n"
