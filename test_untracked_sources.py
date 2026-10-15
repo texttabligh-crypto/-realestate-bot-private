@@ -35,7 +35,7 @@ CREATE TABLE channels (id BIGINT PRIMARY KEY, telegram_channel_id BIGINT, channe
 CREATE TABLE properties (
     id BIGINT PRIMARY KEY, status TEXT, source_kind TEXT, raw_text TEXT,
     input_channel_id BIGINT, input_message_id BIGINT,
-    published_message_id BIGINT, deleted_from_channel_at TIMESTAMPTZ);
+    published_message_id BIGINT, deleted_from_channel_at TIMESTAMPTZ, unit_code TEXT);
 CREATE TABLE property_media (property_id BIGINT, position INTEGER);
 CREATE TABLE property_sources (
     id BIGSERIAL PRIMARY KEY, property_id BIGINT, source_channel_id BIGINT,
@@ -54,6 +54,7 @@ INSERT INTO properties VALUES
     (401, 'ACTIVE', 'SOURCE', 'live duplicate', -1002017017266, 9700, 1501, NULL),
     (402, 'ACTIVE', 'SOURCE', 'holds 9700', -1002017017266, 9701, 1502, NULL),
     (404, 'ACTIVE', 'INPUT', 'origin unknown', -1004370416481, 1300, 1504, NULL);
+UPDATE properties SET unit_code = (id * 100)::text;
 INSERT INTO property_media SELECT 287, g FROM generate_series(740, 747) g;
 INSERT INTO property_sources (id, property_id, source_channel_id, source_message_id,
                               source_unit_code, is_primary, is_active, last_synced_at) VALUES
@@ -92,14 +93,15 @@ class UntrackedSourceDatabaseTest(unittest.TestCase):
                     "last_synced_at IS NULL FROM property_sources")
             }
 
-    def test_reconnects_lost_rows_and_leaves_live_duplicates(self):
+    def test_reconnects_lost_rows_and_reports_live_duplicates(self):
         ns = load("bot.py", {"reconnect_untracked_source_listings"}, {"db_connect": self.connect})
-        restored, created, skipped = ns["reconnect_untracked_source_listings"]()
-        self.assertEqual((restored, created, skipped), ([287], [400], [401]))
+        restored, created, duplicates = ns["reconnect_untracked_source_listings"]()
+        pair = ("40100", 1501, "40200", 1502)
+        self.assertEqual((restored, created, duplicates), ([287], [400], [pair]))
         rows = self.rows()
         self.assertEqual(rows[244], (287, 747, True, True))
         self.assertEqual(rows[500][0], 402)
-        self.assertEqual(ns["reconnect_untracked_source_listings"](), ([], [], [401]))
+        self.assertEqual(ns["reconnect_untracked_source_listings"](), ([], [], [pair]))
 
     def test_forwarded_copy_does_not_take_the_row(self):
         ns = load("ingest.py", {
