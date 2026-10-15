@@ -34,6 +34,7 @@ from shahfile_ai import (
     decline_search_subscription,
     get_active_search_context,
     apply_price_target,
+    price_band,
     OPT_OUT_TEXT,
 )
 
@@ -211,6 +212,22 @@ _DIGIT_MAP = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567
 
 def normalize_digits(value: Any) -> str:
     return str(value or "").translate(_DIGIT_MAP)
+
+
+# A customer who answers with just «11» means homes around 11 billion toman.
+BARE_BUDGET_MIN_BILLION = Decimal("3")
+BARE_BUDGET_MAX_BILLION = Decimal("100")
+
+
+def bare_budget_billion(text):
+    """The budget a message made only of a number stands for, or None."""
+    raw = normalize_digits(text).strip().replace("٫", ".").replace("/", ".")
+    if not re.fullmatch(r"\d{1,3}(?:\.\d{1,2})?", raw):
+        return None
+    value = Decimal(raw)
+    if not BARE_BUDGET_MIN_BILLION <= value <= BARE_BUDGET_MAX_BILLION:
+        return None
+    return float(value)
 
 
 # =========================================================
@@ -1934,6 +1951,24 @@ async def handle_customer_text(update, context):
             "✅ ارسال پیشنهادات جدید برای شما متوقف شد."
             if cancelled
             else "در حال حاضر پیشنهاد خودکاری برای شما فعال نیست."
+        )
+        return True
+
+    # A bare «11» is a budget: offer homes around 11 billion for the customer
+    # to confirm, instead of sending it to an advisor as a question.
+    bare_budget = bare_budget_billion(text) if state == "IDLE" else None
+    if bare_budget is not None:
+        low, high = price_band(bare_budget)
+        await _offer_search_confirmation(
+            update,
+            context,
+            {
+                "price_min_billion": low,
+                "price_max_billion": high,
+                "price_target_billion": bare_budget,
+            },
+            text,
+            customer_id,
         )
         return True
 
