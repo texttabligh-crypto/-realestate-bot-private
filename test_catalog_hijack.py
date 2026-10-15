@@ -118,7 +118,8 @@ class HijackRepairTest(unittest.TestCase):
 
         ns = load({"restore_catalog_hijacked_listings", "catalog_hijacked_listing"}, {
             "_catalog_hijack_rows": lambda: [
-                (286, "3197", OWN_POST, -1002343450519, "royalmelkktbz", 7097, 6401, "68", CATALOG),
+                # Same column order as _catalog_hijack_rows' SELECT.
+                (286, "3197", OWN_POST, -1002343450519, 7097, "royalmelkktbz", 6401, "68", CATALOG),
             ],
             "_get_property_current_price_toman": lambda pid: 7_900_000_000,
             "_get_property_region_category_names": lambda pid: {"نصر"},
@@ -147,6 +148,35 @@ class HijackRepairTest(unittest.TestCase):
         self.assertEqual(source["source_post_url"], "https://t.me/royalmelkktbz/7097")
         self.assertEqual(by_name["categories"][1]["extra_region_names"], {"نصر"})
         self.assertIn("released_duplicates=[296]", logs.output[0])
+
+
+class HijackRowShapeTest(unittest.TestCase):
+    def test_loop_unpacks_columns_in_select_order(self):
+        source = (APP / "bot.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        rows_fn = next(n for n in tree.body if getattr(n, "name", None) == "_catalog_hijack_rows")
+        query = next(
+            c.value for c in ast.walk(rows_fn)
+            if isinstance(c, ast.Constant) and isinstance(c.value, str) and "SELECT" in c.value
+        )
+        selected = [
+            line.strip().rstrip(",").split(".")[-1]
+            for line in query.split("SELECT", 1)[1].split("FROM", 1)[0].splitlines()
+            if line.strip()
+        ]
+        repair = next(n for n in tree.body if getattr(n, "name", None) == "restore_catalog_hijacked_listings")
+        loop = next(n for n in ast.walk(repair) if isinstance(n, ast.For))
+        names = [elt.id for elt in loop.target.elts]
+        self.assertEqual(
+            selected,
+            ["id", "unit_code", "raw_text", "input_channel_id", "input_message_id",
+             "username", "source_message_id", "source_unit_code", "source_raw_text"],
+        )
+        self.assertEqual(
+            names,
+            ["property_id", "unit_code", "raw_text", "channel_id", "message_id",
+             "channel_username", "hijack_message_id", "source_code", "source_text"],
+        )
 
 
 class SourceRowOwnershipTest(unittest.TestCase):
