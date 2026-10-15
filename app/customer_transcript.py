@@ -1,6 +1,7 @@
 """Durable customer-only text history, visible through the CRM permission gate."""
 import asyncio
 import logging
+import re
 from zoneinfo import ZoneInfo
 
 from telegram.ext import ExtBot
@@ -84,16 +85,40 @@ class TranscriptBot(ExtBot):
         return results
 
 
+# A visit link opens the bot with «/start visit_<property id>»; the id is the
+# bot's internal number, so show staff the unit code from the channel instead.
+_VISIT_START = re.compile(r'^/start\s+visit_(\d+)\s*$')
+
+
+def _visit_unit_codes(conn, rows):
+    ids = sorted({int(m.group(1)) for _, _, body, _ in rows if (m := _VISIT_START.match(body or ''))})
+    if not ids:
+        return {}
+    found = conn.execute('SELECT id, unit_code FROM properties WHERE id = ANY(%s)', (ids,)).fetchall()
+    return {int(pid): code for pid, code in found if code}
+
+
+def _readable_body(body, unit_codes):
+    match = _VISIT_START.match(body or '')
+    if not match:
+        return body
+    code = unit_codes.get(int(match.group(1)))
+    if code:
+        return f'🏠 درخواست بازدید واحد {code}'
+    return f'🏠 درخواست بازدید (شمارهٔ داخلی فایل: {match.group(1)})'
+
+
 def history_page(user_id, offset=0):
     with db_connect() as conn:
         rows = conn.execute("""SELECT id,direction,body,recorded_at
             FROM customer_chat_history WHERE telegram_user_id=%s
             ORDER BY recorded_at,message_id,id LIMIT 9 OFFSET %s""", (user_id,offset)).fetchall()
+        unit_codes = _visit_unit_codes(conn, rows[:8])
     lines = ['💬 سابقهٔ گفتگو', 'پیام‌های ثبت‌شده از زمان فعال‌شدن این قابلیت؛ پیام‌های قدیمیِ ثبت‌نشده در دسترس نیستند.']
     for _, direction, body, created in rows[:8]:
         label = 'مشتری' if direction == 'customer' else 'بات / مشاور'
         stamp = created.astimezone(ZoneInfo('Asia/Tehran')).strftime('%Y-%m-%d %H:%M')
-        lines.append(f'{label} — {stamp}\n{body}')
+        lines.append(f'{label} — {stamp}\n{_readable_body(body, unit_codes)}')
     if not rows:
         lines.append('هنوز گفتگویی ثبت نشده است.')
     # Send chunks without truncating any customer text.
