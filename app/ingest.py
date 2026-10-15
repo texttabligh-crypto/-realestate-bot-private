@@ -961,6 +961,8 @@ def _save_property_source_raw(
                     -- A post forwarded again (e.g. into the input channel)
                     -- must not take the row from the live listing that
                     -- already tracks it; that left the listing untracked.
+                    -- An unpublished copy never keeps it from the
+                    -- published listing.
                     property_id = CASE
                         WHEN EXISTS (
                             SELECT 1
@@ -968,6 +970,17 @@ def _save_property_source_raw(
                             WHERE owner.id = property_sources.property_id
                               AND owner.id <> EXCLUDED.property_id
                               AND owner.status = 'ACTIVE'
+                              AND owner.deleted_from_channel_at IS NULL
+                              AND (
+                                    owner.published_message_id IS NOT NULL
+                                    OR NOT EXISTS (
+                                        SELECT 1
+                                        FROM properties incoming
+                                        WHERE incoming.id = EXCLUDED.property_id
+                                          AND incoming.published_message_id
+                                              IS NOT NULL
+                                    )
+                              )
                         )
                         THEN property_sources.property_id
                         ELSE EXCLUDED.property_id
