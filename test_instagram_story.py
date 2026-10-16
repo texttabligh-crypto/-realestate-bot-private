@@ -87,10 +87,10 @@ class StoryTest(unittest.TestCase):
         self.assertEqual(self.story.short_code(dict(LISTING, internal_sequence=1004)), "1004")
 
     def test_title_is_the_listing_facts_not_a_slogan(self):
-        self.assertEqual(self.story.story_titles(LISTING), ("ولیعصر جنوبی", "۸۱ متر، ۲ خواب"))
+        self.assertEqual(self.story.story_titles(LISTING), ("منطقه: ولیعصر جنوبی", "۸۱ متر، ۲ خواب"))
         self.assertEqual(self.story.story_titles(dict(LISTING, district=None)), ("تبریز", "۸۱ متر، ۲ خواب"))
         self.assertEqual(self.story.story_titles(dict(LISTING, area_m2=None, bedrooms=None)),
-                         ("تبریز", "ولیعصر جنوبی"))
+                         ("منطقه: ولیعصر جنوبی", "فایل ویژه"))
         bare = dict(LISTING, district=None, area_m2=None, bedrooms=None)
         self.assertEqual(self.story.story_titles(bare), ("تبریز", "فایل ویژه"))
         source = (APP / "instagram_story.py").read_text(encoding="utf-8")
@@ -125,7 +125,7 @@ class StoryTest(unittest.TestCase):
 
     def test_fallback_caption_is_factual(self):
         self.assertEqual(self.story.fallback_caption(LISTING), "\n".join([
-            "🏡 ۸۱ متر، ۲ خواب | ولیعصر جنوبی",
+            "🏡 ۸۱ متر، ۲ خواب | منطقه: ولیعصر جنوبی",
             "🏢 طبقه ۵ از ۴ • ساخت ۱۳۹۰",
             "✅ آسانسور • انباری",
             "",
@@ -212,20 +212,26 @@ class StoryTest(unittest.TestCase):
         self.assertGreaterEqual(right - left, 0.62 * 960 - 1)
         self.assertLess(right - left, 960)
 
-    def test_story_shows_the_channel_post_location(self):
-        story = self.story
-        listing = dict(LISTING, address_text="ولیعصر پروین اعتصامی", district="▫️سازنده مطمئن")
-        self.assertEqual(story.story_titles(listing)[0], "ولیعصر پروین اعتصامی")
-        self.assertEqual(story.story_facts(listing)[0], "ولیعصر پروین اعتصامی")
-        too_long = dict(LISTING, address_text="ولیعصر، خیابان پروین اعتصامی، کوچه گلستان، پلاک ۱۲")
-        self.assertEqual(story.story_location(too_long), "ولیعصر جنوبی")
-        self.assertEqual(story.story_location(dict(LISTING, address_text="#ولیعصر")), "ولیعصر")
-        caption = story.fallback_caption(dict(LISTING, district="#ولیعصر"))
+    def test_band_names_the_region(self):
+        tag = lambda **fields: self.story.story_titles(dict(LISTING, **fields))[0]
+        self.assertEqual(tag(district="▫️سازنده مطمئن", address_text="ولیعصر پروین اعتصامی"),
+                         "منطقه: ولیعصر")
+        self.assertEqual(tag(district="منظریه", address_text="نصبیات فوق لوکس"), "منطقه: منظریه")
+        self.assertEqual(tag(district=None, address_text="واحد: زعفرانیه"), "منطقه: زعفرانیه")
+        self.assertEqual(tag(district=None, address_text="ائل‌گلی، خیابان ۲۲ بهمن"), "منطقه: ائل گلی")
+        # The source post's hashtags, when the stored fields name no region.
+        self.assertEqual(tag(district=None, raw_text="#آپارتمان_20_25\n#فرشته_جنوبی\nنزدیک ولیعصر"),
+                         "منطقه: فرشته جنوبی")
+        self.assertEqual(tag(district="کوی استانداری"), "منطقه: کوی استانداری")
+        self.assertEqual(tag(district="منطقه: یاغچیان"), "منطقه: یاغچیان")
+        self.assertEqual(tag(district="▫️سازنده مطمئن"), "تبریز")
+        self.assertEqual(tag(district="خیابان امام، کوچه شهید فلانی، پلاک ۱۲"), "تبریز")
+        self.assertEqual(self.story.story_facts(dict(LISTING, district="#ولیعصر"))[0], "ولیعصر")
+        caption = self.story.fallback_caption(dict(LISTING, district="#ولیعصر"))
         self.assertIn("\n#ولیعصر #املاک_تبریز", caption)
 
     def test_emoji_the_font_cannot_draw_are_dropped(self):
-        listing = dict(LISTING, district="\u203c\ufe0f\u203c\ufe0fسازنده مطمئن 🔸")
-        self.assertEqual(self.story.story_titles(listing)[0], "سازنده مطمئن")
+        self.assertEqual(self.story._drawable("\u203c\ufe0f\u203c\ufe0fسازنده مطمئن 🔸"), "سازنده مطمئن")
         self.assertEqual(self.story._shape("✅ پیش‌فروش ✨"), self.story._shape("پیش‌فروش"))
         self.assertIn("\u200c", self.story._drawable("پیش‌فروش"))  # ZWNJ stays
 
@@ -305,8 +311,8 @@ class StoryTest(unittest.TestCase):
         calls = self.send_stories(fail_first=False)
         # Only files: Telegram would shrink a photo to 720×1280.
         self.assertEqual([c for c in calls if c[0] in ("photo", "file")], [
-            ("file", "story-273.jpg", (1080, 1920), "🏡 ۸۱ متر، ۲ خواب | ولیعصر جنوبی"),
-            ("file", "story-274.jpg", (1080, 1920), "🏡 ۸۱ متر، ۲ خواب | ولیعصر جنوبی"),
+            ("file", "story-273.jpg", (1080, 1920), "🏡 ۸۱ متر، ۲ خواب | منطقه: ولیعصر جنوبی"),
+            ("file", "story-274.jpg", (1080, 1920), "🏡 ۸۱ متر، ۲ خواب | منطقه: ولیعصر جنوبی"),
         ])
         self.assertEqual(calls[-1], ("message", "✅ ۲ استوری ساخته شد (۱۰ تا ۱۲ میلیارد)."))
 
@@ -358,7 +364,7 @@ class StoryTest(unittest.TestCase):
 
         def render(photos, listing, kicker, headline, layout=0):
             layouts.append(layout % 4)
-            self.assertEqual((kicker, headline), ("ولیعصر جنوبی", "۸۱ متر، ۲ خواب"))
+            self.assertEqual((kicker, headline), ("منطقه: ولیعصر جنوبی", "۸۱ متر، ۲ خواب"))
             return real_render(photos, listing, kicker, headline, layout)
 
         with mock.patch.object(self.story, "random_story_listings", return_value=listings) as pick, \
