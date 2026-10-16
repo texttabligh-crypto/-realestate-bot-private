@@ -1,12 +1,13 @@
 """Instagram stories for random live listings.
 
-Settings › «📸 استوری اینستاگرام» asks how many stories to make, picks that
-many random live listings that have photos, and sends one 1080×1920 story per
-listing. Each story is built from the listing's real photos and own facts;
-OpenAI only writes the kicker, headline and caption (curated templates are
-used when it is not available). The price is left out on purpose: the call
-to action asks viewers to comment the unit code. No source text, agency name
-or phone number is ever used, and photos are never generated or altered.
+Settings › «📸 استوری اینستاگرام» asks how many stories to make and for which
+price range, picks that many random live listings with photos in the range,
+and sends one 1080×1920 story per listing, rotating through four layouts.
+Each story is built from the listing's real photos and own facts; OpenAI only
+writes the kicker, headline and caption (curated templates are used when it
+is not available). The price is left out on purpose: the call to action asks
+viewers to comment the unit code. No source text, agency name, phone number
+or channel handle is ever drawn, and photos are never generated or altered.
 """
 
 import asyncio
@@ -17,19 +18,22 @@ import os
 import random
 import re
 import urllib.request
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import arabic_reshaper
 from bidi.algorithm import get_display
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from publisher import db_connect, get_destination_channel
+from publisher import db_connect
 
 INSTAGRAM_STORY_ACTION = "insta_story"
 INSTAGRAM_STORY_COUNT_PREFIX = "insta_story_n_"
+INSTAGRAM_STORY_ALL_PRICES = "insta_story_all"
 INSTAGRAM_STORY_COUNT_STATE = "insta_story_count"
+INSTAGRAM_STORY_PRICE_STATE = "insta_story_price"
+INSTAGRAM_STORY_STATES = (INSTAGRAM_STORY_COUNT_STATE, INSTAGRAM_STORY_PRICE_STATE)
 INSTAGRAM_STORY_PERMISSION = "instagram_story"
 INSTAGRAM_STORY_TITLE = "📸 استوری اینستاگرام"
 
@@ -38,6 +42,9 @@ STORY_PHOTO_LIMIT = 4
 STORY_MAX_COUNT = 10
 STORY_COUNT_CHOICES = (1, 3, 5, 10)
 STORY_SEND_SPACING_SECONDS = 1.5
+# Every layout keeps its call to action here, clear of Instagram's reply bar.
+CTA_TOP = 1530
+CTA_HEIGHT = 110
 
 OPENAI_URL = os.getenv("OPENAI_RESPONSES_URL", "https://api.openai.com/v1/responses")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-6-luna")
@@ -53,9 +60,12 @@ TEXT = (255, 255, 255)
 MUTED = (196, 205, 220)
 ACCENT = (226, 182, 82)
 ACCENT_TEXT = (20, 24, 32)
+CREAM = (250, 246, 238)
+CREAM_CHIP = (236, 229, 214)
+DEEP_GOLD = (170, 124, 36)
 
 PERSIAN_DIGITS = str.maketrans("0123456789.", "۰۱۲۳۴۵۶۷۸۹٫")
-LATIN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+LATIN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 _EMOJI = re.compile("[\U0001F000-\U0001FAFF☀-➿️‍#]")
 _PRICE_WORDS = re.compile("میلیارد|میلیون|تومان|ریال")
 
@@ -98,13 +108,25 @@ _LISTING_KEYS = (
 )
 
 
-def random_story_listings(count):
-    """Up to count*2 random live published listings with photos, as dicts."""
+def random_story_listings(count, price_min=None, price_max=None):
+    """
+    Up to count*2 random live published listings with photos, as dicts,
+    priced within [price_min, price_max] billion when given.
+    """
+
+    price_sql = ""
+    params = []
+    if price_min is not None:
+        price_sql += " AND p.current_price_billion >= %s"
+        params.append(price_min)
+    if price_max is not None:
+        price_sql += " AND p.current_price_billion <= %s"
+        params.append(price_max)
 
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                     p.id, p.unit_code, p.district, p.area_m2, p.bedrooms,
                     p.floor_text, p.build_year, p.has_parking, p.has_elevator,
@@ -114,6 +136,7 @@ def random_story_listings(count):
                   AND p.published_message_id IS NOT NULL
                   AND p.deleted_from_channel_at IS NULL
                   AND p.unit_code IS NOT NULL
+                  {price_sql}
                   AND EXISTS (
                       SELECT 1
                       FROM property_media pm
@@ -129,7 +152,7 @@ def random_story_listings(count):
                 ORDER BY random()
                 LIMIT %s
                 """,
-                (int(count) * 2,),
+                (*params, int(count) * 2),
             )
             listings = [dict(zip(_LISTING_KEYS, row)) for row in cur.fetchall()]
             if not listings:
@@ -163,6 +186,53 @@ def random_story_listings(count):
     for listing in listings:
         listing["photo_file_ids"] = photos.get(listing["id"], [])
     return listings
+
+
+def parse_price_range(text):
+    """
+    «۱۰ تا ۱۲ میلیارد» -> (10, 12); «زیر ۸» -> (None, 8); «بالای ۲۰» ->
+    (20, None); a single «۱۰» means around it (±15%). None when no price.
+    """
+
+    text = str(text or "").translate(LATIN_DIGITS).replace("٫", ".").replace("/", ".")
+    numbers = []
+    for raw in re.findall(r"\d+(?:\.\d+)?", text):
+        try:
+            value = Decimal(raw)
+        except InvalidOperation:
+            continue
+        if 0 < value <= 1000:
+            numbers.append(value)
+    if not numbers:
+        return None
+
+    if len(numbers) >= 2:
+        low, high = sorted(numbers[:2])
+        return low, high
+    value = numbers[0]
+    if re.search(r"زیر|کمتر|حداکثر|سقف|تا\s*\d", text):
+        return None, value
+    if re.search(r"بالا|بیشتر|حداقل|به\s*بالا", text):
+        return value, None
+    return (value * Decimal("0.85")).quantize(Decimal("0.01")), (value * Decimal("1.15")).quantize(Decimal("0.01"))
+
+
+def price_range_label(price_range):
+    if not price_range:
+        return "همه قیمت‌ها"
+    low, high = price_range
+
+    def number(value):
+        text = f"{value:f}"
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return persian_digits(text)
+
+    if low is not None and high is not None:
+        return f"{number(low)} تا {number(high)} میلیارد"
+    if high is not None:
+        return f"تا {number(high)} میلیارد"
+    return f"از {number(low)} میلیارد به بالا"
 
 
 def persian_digits(value):
@@ -369,6 +439,19 @@ def _draw_rtl(draw, text, font, right, top, fill):
     draw.text((right - font.getlength(shaped), top), shaped, font=font, fill=fill)
 
 
+def _draw_centered(draw, text, font, box, fill):
+    left, top, right, bottom = box
+    shaped = _shape(text)
+    bbox = font.getbbox(shaped)
+    draw.text(
+        (left + (right - left - font.getlength(shaped)) / 2,
+         top + (bottom - top - (bbox[3] - bbox[1])) / 2 - bbox[1]),
+        shaped,
+        font=font,
+        fill=fill,
+    )
+
+
 def _fit_font(path, text, max_width, size, minimum):
     while size > minimum:
         font = _font(path, size)
@@ -383,6 +466,16 @@ def _rounded(image, radius):
     ImageDraw.Draw(mask).rounded_rectangle((0, 0) + image.size, radius=radius, fill=255)
     image.putalpha(mask)
     return image
+
+
+def _paste_photo(canvas, image, box, radius=0):
+    left, top, right, bottom = box
+    photo = ImageOps.fit(image, (right - left, bottom - top), Image.LANCZOS)
+    if radius:
+        photo = _rounded(photo, radius)
+        canvas.paste(photo, (left, top), photo)
+    else:
+        canvas.paste(photo, (left, top))
 
 
 def _chip_rows(chips, font, max_width, max_rows=2):
@@ -402,14 +495,205 @@ def _chip_rows(chips, font, max_width, max_rows=2):
     return [row for row in rows if row]
 
 
-def render_story(photos, listing, kicker, headline, brand):
-    """photos: list of image bytes, the first is the main photo. Returns JPEG bytes."""
+def _draw_chips(draw, rows, font, right, top, fill, text_fill, outline=None):
+    for row in rows:
+        x = right
+        for chip, width in row:
+            draw.rounded_rectangle(
+                (x - width, top, x, top + 62), radius=31,
+                fill=fill, outline=outline, width=3 if outline else 0,
+            )
+            _draw_centered(draw, chip, font, (x - width, top, x, top + 62), text_fill)
+            x -= width + 16
+        top += 80
+    return top
 
-    width, height = STORY_SIZE
-    margin = 60
-    right = width - margin
-    canvas = Image.new("RGB", STORY_SIZE, BACKGROUND)
-    draw = ImageDraw.Draw(canvas)
+
+def _fade(canvas, top, length, color, height=None):
+    """Blend into color from transparent at top to opaque at top+length."""
+
+    width = canvas.size[0]
+    mask = Image.linear_gradient("L").resize((width, length))
+    canvas.paste(Image.new("RGB", (width, length), color), (0, top), mask)
+    below = (height or canvas.size[1]) - (top + length)
+    if below > 0:
+        canvas.paste(Image.new("RGB", (width, below), color), (0, top + length))
+
+
+def _thumb_row(canvas, images, left, right, top, height, radius=26):
+    gap = 18
+    width = (right - left - gap * (len(images) - 1)) // len(images)
+    x = left
+    for image in images:
+        _paste_photo(canvas, image, (x, top, x + width, top + height), radius)
+        x += width + gap
+
+
+def _cta(draw, listing, box, fill, text_fill):
+    text = call_to_action(listing)
+    left, top, right, bottom = box
+    font = _fit_font(FONT_BLACK, text, right - left - 60, 44, 28)
+    draw.rounded_rectangle(box, radius=(bottom - top) // 2, fill=fill)
+    _draw_centered(draw, text, font, box, text_fill)
+
+
+def _layout_classic(canvas, draw, images, listing, kicker, headline):
+    """Photo on top fading into navy; gold kicker, chips, thumbnails, gold CTA."""
+
+    width = canvas.size[0]
+    margin, right = 60, width - 60
+    kicker_font = _fit_font(FONT_MEDIUM, kicker, width - 2 * margin, 40, 30)
+    headline_font = _font(FONT_BLACK, 76)
+    lines = _wrap(headline, headline_font, width - 2 * margin, 2)
+    chip_font = _font(FONT_MEDIUM, 34)
+    rows = _chip_rows(story_facts(listing), chip_font, width - 2 * margin)
+    extra = images[1:4]
+
+    block = 64 + 104 * len(lines) + 80 * len(rows) + (250 if extra else 0) + 10
+    y = CTA_TOP - 40 - block
+    photo_height = min(max(y + 200, 900), canvas.size[1])
+    _paste_photo(canvas, images[0], (0, 0, width, photo_height))
+    _fade(canvas, photo_height - 460, 460, BACKGROUND)
+
+    _draw_rtl(draw, kicker, kicker_font, right, y, ACCENT)
+    y += 64
+    for line in lines:
+        _draw_rtl(draw, line, headline_font, right, y, TEXT)
+        y += 104
+    y = _draw_chips(draw, rows, chip_font, right, y + 6, CHIP, TEXT)
+    if extra:
+        _thumb_row(canvas, extra, margin, right, y + 22, 210)
+    _cta(draw, listing, (margin, CTA_TOP, right, CTA_TOP + CTA_HEIGHT), ACCENT, ACCENT_TEXT)
+
+
+def _layout_card(canvas, draw, images, listing, kicker, headline):
+    """Blurred photo backdrop with a cream card: framed photo and dark text."""
+
+    width, height = canvas.size
+    backdrop = ImageOps.fit(images[0], (width, height), Image.LANCZOS).filter(
+        ImageFilter.GaussianBlur(28)
+    )
+    canvas.paste(Image.blend(backdrop, Image.new("RGB", (width, height), (0, 0, 0)), 0.45))
+
+    card = (50, 250, width - 50, CTA_TOP + CTA_HEIGHT + 40)
+    draw.rounded_rectangle(card, radius=48, fill=CREAM)
+    left, right = card[0] + 36, card[2] - 36
+
+    kicker_font = _fit_font(FONT_MEDIUM, kicker, right - left, 38, 28)
+    headline_font = _font(FONT_BLACK, 66)
+    lines = _wrap(headline, headline_font, right - left, 2)
+    chip_font = _font(FONT_MEDIUM, 32)
+    rows = _chip_rows(story_facts(listing), chip_font, right - left)
+    extra = images[1:4]
+
+    # The framed photo takes whatever the text leaves free in the card.
+    block = 58 + 92 * len(lines) + 8 + 80 * len(rows) + (200 if extra else 0)
+    y = CTA_TOP - 30 - block
+    _paste_photo(canvas, images[0], (left, card[1] + 36, right, y - 34), 34)
+
+    _draw_rtl(draw, kicker, kicker_font, right, y, DEEP_GOLD)
+    y += 58
+    for line in lines:
+        _draw_rtl(draw, line, headline_font, right, y, ACCENT_TEXT)
+        y += 92
+    y = _draw_chips(draw, rows, chip_font, right, y + 8, CREAM_CHIP, ACCENT_TEXT)
+    if extra:
+        _thumb_row(canvas, extra, left, right, y + 10, 170)
+    _cta(draw, listing, (left, CTA_TOP, right, CTA_TOP + CTA_HEIGHT), BACKGROUND, ACCENT)
+
+
+def _layout_grid(canvas, draw, images, listing, kicker, headline):
+    """Photo collage on top, a gold band with the headline, chips below."""
+
+    width = canvas.size[0]
+    margin, right = 60, width - 60
+    gap = 12
+    top_height = 1050
+    if len(images) >= 3:
+        _paste_photo(canvas, images[0], (0, 0, width, 640))
+        half = (width - gap) // 2
+        _paste_photo(canvas, images[1], (0, 640 + gap, half, top_height))
+        _paste_photo(canvas, images[2], (half + gap, 640 + gap, width, top_height))
+    elif len(images) == 2:
+        _paste_photo(canvas, images[0], (0, 0, width, 640))
+        _paste_photo(canvas, images[1], (0, 640 + gap, width, top_height))
+    else:
+        _paste_photo(canvas, images[0], (0, 0, width, top_height))
+
+    band_top = top_height
+    headline_font = _font(FONT_BLACK, 62)
+    lines = _wrap(headline, headline_font, width - 2 * margin, 2)
+    band_height = 70 + 86 * len(lines) + 40
+    draw.rectangle((0, band_top, width, band_top + band_height), fill=ACCENT)
+    kicker_font = _fit_font(FONT_MEDIUM, kicker, width - 2 * margin, 36, 28)
+    _draw_rtl(draw, kicker, kicker_font, right, band_top + 24, ACCENT_TEXT)
+    y = band_top + 78
+    for line in lines:
+        _draw_rtl(draw, line, headline_font, right, y, ACCENT_TEXT)
+        y += 86
+
+    chip_font = _font(FONT_MEDIUM, 34)
+    rows = _chip_rows(story_facts(listing), chip_font, width - 2 * margin)
+    chips_top = band_top + band_height + 40
+    room = max(1, (CTA_TOP - 30 - chips_top) // 80)
+    _draw_chips(draw, rows[:room], chip_font, right, chips_top, CHIP, TEXT)
+    _cta(draw, listing, (margin, CTA_TOP, right, CTA_TOP + CTA_HEIGHT), TEXT, ACCENT_TEXT)
+
+
+def _layout_overlay(canvas, draw, images, listing, kicker, headline):
+    """Full-bleed photo under a dark gradient; code badge, outlined chips."""
+
+    width, height = canvas.size
+    margin, right = 60, width - 60
+    _paste_photo(canvas, images[0], (0, 0, width, height))
+
+    headline_font = _font(FONT_BLACK, 80)
+    lines = _wrap(headline, headline_font, width - 2 * margin, 2)
+    chip_font = _font(FONT_MEDIUM, 34)
+    rows = _chip_rows(story_facts(listing), chip_font, width - 2 * margin)
+    block = 80 + 110 * len(lines) + 80 * len(rows) + 10
+    y = CTA_TOP - 40 - block
+
+    shade = Image.new("RGB", (width, height), (8, 12, 20))
+    mask = Image.new("L", (width, height), 0)
+    gradient = Image.linear_gradient("L").resize((width, 520)).point(lambda v: int(v * 0.9))
+    mask.paste(gradient, (0, y - 420))
+    mask.paste(Image.new("L", (width, height - (y + 100)), 230), (0, y + 100))
+    canvas.paste(shade, (0, 0), mask)
+
+    # The unit code viewers are asked to comment, inside the top safe zone.
+    code_font = _font(FONT_BLACK, 40)
+    code_text = f"کد {persian_digits(listing['unit_code'])}"
+    code_width = code_font.getlength(_shape(code_text)) + 60
+    badge = (right - code_width, 270, right, 340)
+    draw.rounded_rectangle(badge, radius=35, fill=ACCENT)
+    _draw_centered(draw, code_text, code_font, badge, ACCENT_TEXT)
+
+    kicker_font = _fit_font(FONT_MEDIUM, kicker, width - 2 * margin - 40, 34, 26)
+    tag_width = kicker_font.getlength(_shape(kicker)) + 44
+    draw.rounded_rectangle((right - tag_width, y, right, y + 58), radius=14, fill=ACCENT)
+    _draw_centered(draw, kicker, kicker_font, (right - tag_width, y, right, y + 58), ACCENT_TEXT)
+    y += 80
+    for line in lines:
+        _draw_rtl(draw, line, headline_font, right, y, TEXT)
+        y += 110
+    _draw_chips(draw, rows, chip_font, right, y + 4, None, TEXT, outline=TEXT)
+    _cta(draw, listing, (margin, CTA_TOP, right, CTA_TOP + CTA_HEIGHT), TEXT, ACCENT_TEXT)
+
+
+STORY_LAYOUTS = (
+    ("classic", _layout_classic, ACCENT),
+    ("card", _layout_card, BACKGROUND),
+    ("grid", _layout_grid, TEXT),
+    ("overlay", _layout_overlay, TEXT),
+)
+
+
+def render_story(photos, listing, kicker, headline, layout=0):
+    """
+    photos: image bytes, the first is the main photo; layout: index into
+    STORY_LAYOUTS. Returns JPEG bytes.
+    """
 
     images = []
     for data in photos:
@@ -420,95 +704,10 @@ def render_story(photos, listing, kicker, headline, brand):
     if not images:
         raise ValueError("no readable photo")
 
-    kicker_font = _fit_font(FONT_MEDIUM, kicker, width - 2 * margin, 40, 30)
-    headline_font = _font(FONT_BLACK, 76)
-    headline_lines = _wrap(headline, headline_font, width - 2 * margin, 2)
-    chip_font = _font(FONT_MEDIUM, 34)
-    chip_rows = _chip_rows(story_facts(listing), chip_font, width - 2 * margin)
-    extra = images[1:4]
-
-    # The text block sits right above the call to action, which stays clear
-    # of Instagram's reply bar; the main photo fills everything above it.
-    cta_height = 110
-    cta_top = 1530
-    block_height = (
-        (64 if kicker else 0)
-        + 104 * len(headline_lines)
-        + 80 * len(chip_rows)
-        + (250 if extra else 0)
-        + 10
-    )
-    y = cta_top - 40 - block_height
-
-    photo_height = min(max(y + 200, 900), height)
-    canvas.paste(ImageOps.fit(images[0], (width, photo_height), Image.LANCZOS), (0, 0))
-    fade_length = 460
-    fade = Image.linear_gradient("L").resize((width, fade_length))
-    canvas.paste(
-        Image.new("RGB", (width, fade_length), BACKGROUND),
-        (0, photo_height - fade_length),
-        fade,
-    )
-
-    # Brand tag inside Instagram's top safe zone.
-    if brand:
-        brand_font = _font(FONT_MEDIUM, 34)
-        brand_text = f"@{brand}"
-        brand_width = brand_font.getlength(brand_text)
-        draw.rounded_rectangle(
-            (right - brand_width - 40, 260, right, 320), radius=30, fill=(0, 0, 0)
-        )
-        draw.text((right - brand_width - 20, 266), brand_text, font=brand_font, fill=TEXT)
-
-    if kicker:
-        _draw_rtl(draw, kicker, kicker_font, right, y, ACCENT)
-        y += 64
-    for line in headline_lines:
-        _draw_rtl(draw, line, headline_font, right, y, TEXT)
-        y += 104
-
-    y += 6
-    for row in chip_rows:
-        x = right
-        for chip, chip_width in row:
-            draw.rounded_rectangle((x - chip_width, y, x, y + 62), radius=31, fill=CHIP)
-            shaped = _shape(chip)
-            box = chip_font.getbbox(shaped)
-            draw.text(
-                (x - chip_width + 28, y + (62 - (box[3] - box[1])) / 2 - box[1]),
-                shaped,
-                font=chip_font,
-                fill=TEXT,
-            )
-            x -= chip_width + 16
-        y += 80
-
-    # Up to three more photos in a row.
-    if extra:
-        y += 22
-        gap = 18
-        thumb_width = (width - 2 * margin - gap * (len(extra) - 1)) // len(extra)
-        thumb_height = 210
-        x = margin
-        for image in extra:
-            thumb = _rounded(ImageOps.fit(image, (thumb_width, thumb_height), Image.LANCZOS), 26)
-            canvas.paste(thumb, (x, y), thumb)
-            x += thumb_width + gap
-
-    cta = call_to_action(listing)
-    cta_font = _fit_font(FONT_BLACK, cta, width - 2 * margin - 60, 44, 28)
-    draw.rounded_rectangle(
-        (margin, cta_top, width - margin, cta_top + cta_height), radius=55, fill=ACCENT
-    )
-    shaped = _shape(cta)
-    box = cta_font.getbbox(shaped)
-    draw.text(
-        ((width - cta_font.getlength(shaped)) / 2,
-         cta_top + (cta_height - (box[3] - box[1])) / 2 - box[1]),
-        shaped,
-        font=cta_font,
-        fill=ACCENT_TEXT,
-    )
+    canvas = Image.new("RGB", STORY_SIZE, BACKGROUND)
+    draw = ImageDraw.Draw(canvas)
+    _name, render, _cta_fill = STORY_LAYOUTS[layout % len(STORY_LAYOUTS)]
+    render(canvas, draw, images, listing, kicker, headline)
 
     output = io.BytesIO()
     canvas.save(output, format="JPEG", quality=92, optimize=True)
@@ -540,12 +739,40 @@ def story_count_keyboard():
     )
 
 
+def story_price_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💰 همه قیمت‌ها", callback_data=INSTAGRAM_STORY_ALL_PRICES)],
+            [InlineKeyboardButton("⬅️ بازگشت به تنظیمات", callback_data="settings")],
+        ]
+    )
+
+
 def story_done_keyboard():
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🔄 ساخت استوری‌های بیشتر", callback_data=INSTAGRAM_STORY_ACTION)],
             [InlineKeyboardButton("⬅️ بازگشت به تنظیمات", callback_data="settings")],
         ]
+    )
+
+
+def _count_prompt():
+    return (
+        f"{INSTAGRAM_STORY_TITLE}\n\n"
+        "چند تا استوری بسازم؟\n"
+        f"یکی از دکمه‌ها رو بزنید یا عددش رو بنویسید (۱ تا {persian_digits(STORY_MAX_COUNT)})."
+    )
+
+
+def _price_prompt(count):
+    return (
+        f"{INSTAGRAM_STORY_TITLE}\n\n"
+        f"✅ {persian_digits(count)} استوری\n\n"
+        "بازهٔ قیمت رو بنویسید، مثلاً:\n"
+        "«۱۰ تا ۱۲ میلیارد» یا «زیر ۸» یا «بالای ۲۰»\n\n"
+        "یا «💰 همه قیمت‌ها» رو بزنید.\n"
+        "قیمت روی استوری نمیاد تا مخاطب کد رو کامنت کنه."
     )
 
 
@@ -560,16 +787,19 @@ async def _download_photos(bot, file_ids):
     return photos
 
 
-async def make_stories(bot, chat_id, count):
-    """Pick count random listings and send one story each, one by one."""
+async def make_stories(bot, chat_id, count, price_range=None, rng=random):
+    """Pick count random listings in the price range and send one story each."""
 
-    status = await bot.send_message(chat_id, f"⏳ در حال ساخت {persian_digits(count)} استوری…")
-    destination = get_destination_channel()
-    brand = str(destination[2] or "").lstrip("@") if destination else ""
+    label = price_range_label(price_range)
+    status = await bot.send_message(
+        chat_id, f"⏳ در حال ساخت {persian_digits(count)} استوری ({label})…"
+    )
+    low, high = price_range or (None, None)
+    first_layout = rng.randrange(len(STORY_LAYOUTS))
     made = 0
 
     try:
-        listings = await asyncio.to_thread(random_story_listings, count)
+        listings = await asyncio.to_thread(random_story_listings, count, low, high)
         for listing in listings:
             if made >= count:
                 break
@@ -579,7 +809,8 @@ async def make_stories(bot, chat_id, count):
             text = await asyncio.to_thread(openai_story_text, listing)
             try:
                 image = await asyncio.to_thread(
-                    render_story, photos, listing, text["kicker"], text["headline"], brand
+                    render_story, photos, listing, text["kicker"], text["headline"],
+                    first_layout + made,
                 )
             except ValueError:
                 continue
@@ -594,12 +825,16 @@ async def make_stories(bot, chat_id, count):
                 chat_id,
                 document=io.BytesIO(image),
                 filename=f"story-{listing['unit_code']}.jpg",
-                caption=f"📎 فایل باکیفیت استوری {persian_digits(made)} (کد {persian_digits(listing['unit_code'])})",
+                caption=(
+                    f"📎 فایل باکیفیت استوری {persian_digits(made)} "
+                    f"(کد {persian_digits(listing['unit_code'])})"
+                ),
             )
             logging.info(
-                "Instagram story created: property_id=%s unit_code=%s",
+                "Instagram story created: property_id=%s unit_code=%s layout=%s",
                 listing["id"],
                 listing["unit_code"],
+                STORY_LAYOUTS[(first_layout + made - 1) % len(STORY_LAYOUTS)][0],
             )
             try:
                 await status.edit_text(
@@ -617,18 +852,18 @@ async def make_stories(bot, chat_id, count):
             pass
 
     if made == count:
-        summary = f"✅ {persian_digits(made)} استوری ساخته شد."
+        summary = f"✅ {persian_digits(made)} استوری ساخته شد ({label})."
     elif made:
         summary = (
             f"✅ {persian_digits(made)} استوری ساخته شد؛ "
-            "فایل فعال عکس‌دار بیشتری پیدا نشد."
+            f"در بازهٔ «{label}» فایل فعال عکس‌دار بیشتری پیدا نشد."
         )
     else:
-        summary = "⚠️ فایل فعال عکس‌داری برای ساخت استوری پیدا نشد."
+        summary = f"⚠️ در بازهٔ «{label}» فایل فعال عکس‌داری برای ساخت استوری پیدا نشد."
     await bot.send_message(chat_id, summary, reply_markup=story_done_keyboard())
 
 
-def _start_batch(context, chat_id, count):
+def _start_batch(context, chat_id, count, price_range):
     running = context.application.bot_data.setdefault("instagram_story_chats", set())
     if chat_id in running:
         return False
@@ -636,7 +871,7 @@ def _start_batch(context, chat_id, count):
 
     async def run():
         try:
-            await make_stories(context.bot, chat_id, count)
+            await make_stories(context.bot, chat_id, count, price_range)
         finally:
             running.discard(chat_id)
 
@@ -645,41 +880,66 @@ def _start_batch(context, chat_id, count):
     return True
 
 
+def _clear(context):
+    context.user_data.pop("state", None)
+    return context.user_data.pop("insta_story_count", None)
+
+
 async def handle_instagram_story_button(query, context):
     action = query.data or ""
     chat_id = query.message.chat_id
 
     if action.startswith(INSTAGRAM_STORY_COUNT_PREFIX):
-        context.user_data.pop("state", None)
         count = parse_story_count(action[len(INSTAGRAM_STORY_COUNT_PREFIX):])
-        if count and not _start_batch(context, chat_id, count):
+        if not count:
+            return
+        context.user_data["insta_story_count"] = count
+        context.user_data["state"] = INSTAGRAM_STORY_PRICE_STATE
+        await query.edit_message_text(_price_prompt(count), reply_markup=story_price_keyboard())
+        return
+
+    if action == INSTAGRAM_STORY_ALL_PRICES:
+        count = _clear(context)
+        if not count:
+            await query.edit_message_text(_count_prompt(), reply_markup=story_count_keyboard())
+            context.user_data["state"] = INSTAGRAM_STORY_COUNT_STATE
+            return
+        if not _start_batch(context, chat_id, count, None):
             await query.message.reply_text("⏳ استوری‌های قبلی هنوز در حال ساخت‌اند.")
         return
 
+    _clear(context)
     context.user_data["state"] = INSTAGRAM_STORY_COUNT_STATE
-    await query.edit_message_text(
-        f"{INSTAGRAM_STORY_TITLE}\n\n"
-        "چند تا استوری بسازم؟\n"
-        f"یکی از دکمه‌ها رو بزنید یا عددش رو بنویسید (۱ تا {persian_digits(STORY_MAX_COUNT)}).\n\n"
-        "ربات خودش فایل‌ها رو رندوم انتخاب می‌کنه، با عکس‌های واقعی طراحی می‌کنه "
-        "و یکی‌یکی می‌فرسته. قیمت روی استوری نمیاد تا مخاطب کد رو کامنت کنه.",
-        reply_markup=story_count_keyboard(),
-    )
+    await query.edit_message_text(_count_prompt(), reply_markup=story_count_keyboard())
 
 
-async def handle_instagram_story_count_text(update, context, allowed):
-    context.user_data.pop("state", None)
+async def handle_instagram_story_text(update, context, allowed):
+    state = context.user_data.get("state")
     if not allowed:
+        _clear(context)
         return
 
-    count = parse_story_count(update.message.text)
-    if not count:
-        context.user_data["state"] = INSTAGRAM_STORY_COUNT_STATE
+    if state == INSTAGRAM_STORY_COUNT_STATE:
+        count = parse_story_count(update.message.text)
+        if not count:
+            await update.message.reply_text(
+                f"لطفاً یه عدد بین ۱ تا {persian_digits(STORY_MAX_COUNT)} بفرستید.",
+                reply_markup=story_count_keyboard(),
+            )
+            return
+        context.user_data["insta_story_count"] = count
+        context.user_data["state"] = INSTAGRAM_STORY_PRICE_STATE
+        await update.message.reply_text(_price_prompt(count), reply_markup=story_price_keyboard())
+        return
+
+    price_range = parse_price_range(update.message.text)
+    if price_range is None:
         await update.message.reply_text(
-            f"لطفاً یه عدد بین ۱ تا {persian_digits(STORY_MAX_COUNT)} بفرستید.",
-            reply_markup=story_count_keyboard(),
+            "بازهٔ قیمت رو متوجه نشدم 🙏 مثلاً بنویسید «۱۰ تا ۱۲ میلیارد».",
+            reply_markup=story_price_keyboard(),
         )
         return
 
-    if not _start_batch(context, update.effective_chat.id, count):
+    count = _clear(context) or STORY_COUNT_CHOICES[2]
+    if not _start_batch(context, update.effective_chat.id, count, price_range):
         await update.message.reply_text("⏳ استوری‌های قبلی هنوز در حال ساخت‌اند.")
