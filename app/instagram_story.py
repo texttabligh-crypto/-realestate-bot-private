@@ -30,7 +30,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from property_parser import KNOWN_DISTRICTS, is_feature_line_district, normalize_text
-from publisher import db_connect
+from publisher import build_channel_post_url, db_connect, get_destination_channel
 
 INSTAGRAM_STORY_ACTION = "insta_story"
 INSTAGRAM_STORY_COUNT_PREFIX = "insta_story_n_"
@@ -90,6 +90,7 @@ _LISTING_KEYS = (
     "id", "unit_code", "district", "area_m2", "bedrooms", "floor_text",
     "build_year", "has_parking", "has_elevator", "has_storage",
     "internal_sequence", "direction", "address_text", "raw_text",
+    "published_message_id", "channel_post_url",
 )
 
 
@@ -150,7 +151,7 @@ def random_story_listings(count, price_min=None, price_max=None):
                     p.id, p.unit_code, p.district, p.area_m2, p.bedrooms,
                     p.floor_text, p.build_year, p.has_parking, p.has_elevator,
                     p.has_storage, p.internal_sequence, p.direction, p.address_text,
-                    p.raw_text
+                    p.raw_text, p.published_message_id, p.channel_post_url
                 FROM properties p
                 WHERE p.status = 'ACTIVE'
                   AND p.published_message_id IS NOT NULL
@@ -495,6 +496,24 @@ def fallback_caption(listing):
     return "\n\n".join(("\n".join(facts), f"💬 {call_to_action(listing)}", _hashtags(listing)))
 
 
+def channel_post_link(listing, username):
+    """The listing's post in our channel, linked the way visit notifications link it."""
+
+    return (
+        build_channel_post_url(username, listing.get("published_message_id"))
+        or listing.get("channel_post_url")
+    )
+
+
+def with_channel_link(caption, link):
+    """The caption, within Telegram's 1024 characters, with the post link kept whole."""
+
+    if not link:
+        return caption[:1024]
+    tail = f"\n\n🔗 لینک فایل در کانال:\n{link}"
+    return caption[:1024 - len(tail)].rstrip() + tail
+
+
 def openai_caption(listing, rng=random):
     """The Instagram caption from OpenAI, or a factual template."""
 
@@ -833,8 +852,9 @@ def _info(listing, tag, headline, width):
         height += BLOCK_GAP + TILE_HEIGHT
     if rows:
         height += BLOCK_GAP + CHIP_STEP * len(rows) - (CHIP_STEP - CHIP_HEIGHT)
-    title_width = max(font.getlength(_shape(text)) for font, text in
-                      [(tag_font, tag)] + [(headline_font, line) for line in lines])
+    tag_width = sum(font.getlength(_shape(text)) + font.getlength(" ")
+                    for text, font, _fill in _tag_parts(tag, tag_font))
+    title_width = max([tag_width] + [headline_font.getlength(_shape(line)) for line in lines])
     return {
         "tag": tag, "tag_font": tag_font, "lines": lines, "headline_font": headline_font,
         "stats": stats, "chip_font": chip_font, "rows": rows,
@@ -844,6 +864,27 @@ def _info(listing, tag, headline, width):
     }
 
 
+def _tag_parts(tag, font):
+    """«منطقه: ولیعصر» as (text, font, colour): a light label, then the region in bold white."""
+
+    label, separator, region = tag.partition(": ")
+    if not separator:
+        return [(tag, font, RED_TINT)]
+    return [(label + ":", font, RED_TINT), (region, _font(FONT_BLACK, font.size + 2), TEXT)]
+
+
+def _draw_tag(draw, tag, font, right, top, bottom):
+    """The tag's parts right to left on one baseline, centred in [top, bottom]."""
+
+    parts = _tag_parts(tag, font)
+    bbox = font.getbbox(_shape(parts[0][0]))
+    baseline = top + (bottom - top - (bbox[3] - bbox[1])) / 2 - bbox[1] + font.getmetrics()[0]
+    for text, part_font, fill in parts:
+        shaped = _shape(text)
+        draw.text((right, baseline), shaped, font=part_font, fill=fill, anchor="rs")
+        right -= part_font.getlength(shaped) + part_font.getlength(" ")
+
+
 def _draw_band(canvas, info, box, radius=0):
     """The red title band: district, then «۱۵۱ متر، ۳ خواب» in big white type."""
 
@@ -851,7 +892,7 @@ def _draw_band(canvas, info, box, radius=0):
     draw = ImageDraw.Draw(canvas)
     right = min(box[2], canvas.width) - (MARGIN if box[2] >= canvas.width else 44)
     y = box[1] + BAND_PADDING
-    _draw_right(draw, info["tag"], info["tag_font"], right, y, y + TAG_LINE, RED_TINT)
+    _draw_tag(draw, info["tag"], info["tag_font"], right, y, y + TAG_LINE)
     y += TAG_LINE
     for line in info["lines"]:
         _draw_right(draw, line, info["headline_font"], right, y, y + HEADLINE_LINE, TEXT)
@@ -1164,6 +1205,12 @@ async def make_stories(bot, chat_id, count, price_range=None, rng=random):
 
     try:
         listings = await asyncio.to_thread(random_story_listings, count, low, high)
+        try:
+            destination = await asyncio.to_thread(get_destination_channel)
+        except Exception:
+            logging.exception("Story channel link unavailable")
+            destination = None
+        username = destination[2] if destination else None
         for listing in listings:
             if made >= count:
                 break
@@ -1171,6 +1218,7 @@ async def make_stories(bot, chat_id, count, price_range=None, rng=random):
             if not photos:
                 continue
             caption = await asyncio.to_thread(openai_caption, listing, rng)
+            caption = with_channel_link(caption, channel_post_link(listing, username))
             tag, headline = story_titles(listing)
             try:
                 image = await asyncio.to_thread(
@@ -1188,7 +1236,7 @@ async def make_stories(bot, chat_id, count, price_range=None, rng=random):
                     chat_id,
                     document=io.BytesIO(image),
                     filename=f"story-{short_code(listing)}.jpg",
-                    caption=caption[:1024],
+                    caption=caption,
                     read_timeout=60,
                     write_timeout=60,
                     connect_timeout=10,

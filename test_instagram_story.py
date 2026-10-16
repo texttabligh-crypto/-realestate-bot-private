@@ -51,7 +51,12 @@ def load_story_module():
     sys.path.insert(0, str(APP))
     stubs = {
         "telegram": types.SimpleNamespace(InlineKeyboardButton=Button, InlineKeyboardMarkup=Markup),
-        "publisher": types.SimpleNamespace(db_connect=None),
+        "publisher": types.SimpleNamespace(
+            db_connect=None,
+            get_destination_channel=lambda: (-100, "NIMAT", "nimatmelk"),
+            build_channel_post_url=lambda username, message_id: (
+                f"https://t.me/{username.lstrip('@')}/{message_id}" if username and message_id else None),
+        ),
     }
     with mock.patch.dict(sys.modules, stubs):
         sys.modules.pop("instagram_story", None)
@@ -251,7 +256,32 @@ class StoryTest(unittest.TestCase):
     def test_no_channel_handle_is_drawn(self):
         source = (APP / "instagram_story.py").read_text(encoding="utf-8")
         self.assertNotIn("brand", source)
-        self.assertNotIn("get_destination_channel", source)
+        image_code = source[source.index("# ---------------------------------------------------------------- image"):
+                            source.index("# ---------------------------------------------------------------- telegram")]
+        for name in ("username", "get_destination_channel", "t.me", "channel_post"):
+            self.assertNotIn(name, image_code)
+
+    def test_caption_ends_with_our_channel_post(self):
+        story = self.story
+        listing = dict(LISTING, published_message_id=1620, channel_post_url="https://t.me/old/1")
+        self.assertEqual(story.channel_post_link(listing, "@nimatmelk"), "https://t.me/nimatmelk/1620")
+        self.assertEqual(story.channel_post_link(listing, None), "https://t.me/old/1")
+        self.assertIsNone(story.channel_post_link(LISTING, "nimatmelk"))
+        self.assertEqual(story.with_channel_link("متن", "https://t.me/nimatmelk/1620"),
+                         "متن\n\n🔗 لینک فایل در کانال:\nhttps://t.me/nimatmelk/1620")
+        self.assertEqual(story.with_channel_link("متن", None), "متن")
+        long = story.with_channel_link("x" * 1500, "https://t.me/nimatmelk/1620")
+        self.assertEqual(len(long), 1024)
+        self.assertTrue(long.endswith("https://t.me/nimatmelk/1620"))
+
+    def test_region_name_is_bold_after_a_light_label(self):
+        font = self.story._font(self.story.FONT_MEDIUM, 44)
+        (label, label_font, label_fill), (region, region_font, region_fill) = \
+            self.story._tag_parts("منطقه: ولیعصر", font)
+        self.assertEqual((label, label_font, label_fill), ("منطقه:", font, self.story.RED_TINT))
+        self.assertEqual((region, region_fill), ("ولیعصر", self.story.TEXT))
+        self.assertTrue(region_font.path.endswith("IRANSansWeb_Black.ttf"))
+        self.assertEqual(self.story._tag_parts("تبریز", font), [("تبریز", font, self.story.RED_TINT)])
 
     def test_unreadable_photos_are_reported(self):
         with self.assertRaises(ValueError):
@@ -375,10 +405,13 @@ class StoryTest(unittest.TestCase):
                 # A big file gets more time than Telegram's 5s default.
                 self_test.assertEqual(timeouts["read_timeout"], 60)
                 size = Image.open(document).size
-                calls.append(("file", filename, size, caption.splitlines()[0]))
+                lines = caption.splitlines()
+                self_test.assertEqual(lines[-2:], ["🔗 لینک فایل در کانال:", f"https://t.me/nimatmelk/{filename[6:9]}"])
+                calls.append(("file", filename, size, lines[0]))
 
         listings = [dict(LISTING, id=i, unit_code=f"{273 + i}10", internal_sequence=273 + i,
-                         photo_file_ids=["a", "b"]) for i in range(available)]
+                         published_message_id=273 + i, photo_file_ids=["a", "b"])
+                    for i in range(available)]
         layouts = []
         real_render = self.story.render_story
 
@@ -443,6 +476,7 @@ class StoryRepeatDatabaseTest(unittest.TestCase):
                     bedrooms INT, floor_text TEXT, build_year INT, has_parking BOOL,
                     has_elevator BOOL, has_storage BOOL, internal_sequence INT, direction TEXT,
                     address_text TEXT, raw_text TEXT, status TEXT, published_message_id BIGINT,
+                    channel_post_url TEXT,
                     deleted_from_channel_at TIMESTAMPTZ, current_price_billion NUMERIC);
                 CREATE TABLE property_media (
                     id BIGSERIAL PRIMARY KEY, property_id BIGINT, telegram_file_id TEXT,
