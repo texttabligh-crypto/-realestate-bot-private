@@ -171,14 +171,52 @@ class StoryTest(unittest.TestCase):
         self.assertEqual(tops, sorted(tops, reverse=True))
         self.assertGreater(tops[0] - tops[2], 200)
 
-    def test_tall_photo_in_a_wide_box_is_shown_whole(self):
+    def test_every_photo_fills_its_box(self):
         canvas = Image.new("RGB", (1000, 300))
-        tall = Image.new("RGB", (300, 600), (200, 30, 30))
-        self.story._paste_photo(canvas, tall, (0, 0, 1000, 300))
-        self.assertTrue(near(canvas.getpixel((500, 150)), (200, 30, 30)))
-        self.assertFalse(near(canvas.getpixel((20, 150)), (200, 30, 30)))
-        self.story._paste_photo(canvas, Image.new("RGB", (1600, 600), (200, 30, 30)), (0, 0, 1000, 300))
-        self.assertTrue(near(canvas.getpixel((20, 150)), (200, 30, 30)))
+        self.story._paste_photo(canvas, Image.new("RGB", (300, 600), (200, 30, 30)), (0, 0, 1000, 300))
+        for x in (2, 500, 997):
+            self.assertTrue(near(canvas.getpixel((x, 150)), (200, 30, 30)))
+
+    def test_grid_puts_photos_in_boxes_of_their_shape(self):
+        choose = self.story._choose_grid
+        upright = [Image.new("RGB", (600, 800), (i, 0, 0)) for i in range(4)]
+        wide = [Image.new("RGB", (1280, 960), (i, 0, 0)) for i in range(4)]
+        classic = ("top_strip", "top_pair", "columns", "rows", "single")
+        mosaic = ("side_stack", "top_pair", "columns", "rows", "top_strip", "single")
+        area = (0, 0, 1080, 900)
+        self.assertEqual(choose(upright, area, classic)[0], "columns")
+        self.assertEqual(choose(upright, area, mosaic)[0], "side_stack")
+        self.assertEqual(choose(wide, area, classic)[0], "top_strip")
+        name, boxes, chosen = choose(wide, area, classic)
+        self.assertEqual(len(boxes), 4)
+        self.assertIs(chosen[0], wide[0])  # the first photo keeps the big box
+        # In a mixed set the upright photo takes the tall column.
+        mixed = [wide[0], upright[1], wide[2]]
+        name, boxes, chosen = choose(mixed, area, mosaic)
+        self.assertEqual(name, "side_stack")
+        self.assertIs(chosen[0], upright[1])
+        self.assertEqual(choose(upright[:1], area, classic)[0], "single")
+        # The boxes tile the area without overlapping it.
+        for grid in self.story._photo_grids(area, 4).values():
+            for left, top, right, bottom in grid:
+                self.assertTrue(0 <= left < right <= 1080 and 0 <= top < bottom <= 900)
+
+    def test_magazine_frame_takes_the_photo_shape(self):
+        fitted = self.story._fitted_box
+        area = (60, 390, 1020, 900)
+        left, top, right, bottom = fitted(Image.new("RGB", (1280, 640)), area)
+        self.assertEqual((left, right), (60, 1020))
+        self.assertAlmostEqual((right - left) / (bottom - top), 2, delta=0.02)
+        left, top, right, bottom = fitted(Image.new("RGB", (600, 800)), area)
+        self.assertEqual((top, bottom), (390, 900))
+        self.assertGreaterEqual(right - left, 0.62 * 960 - 1)
+        self.assertLess(right - left, 960)
+
+    def test_emoji_the_font_cannot_draw_are_dropped(self):
+        listing = dict(LISTING, district="\u203c\ufe0f\u203c\ufe0fسازنده مطمئن 🔸")
+        self.assertEqual(self.story.story_titles(listing)[0], "سازنده مطمئن")
+        self.assertEqual(self.story._shape("✅ پیش‌فروش ✨"), self.story._shape("پیش‌فروش"))
+        self.assertIn("\u200c", self.story._drawable("پیش‌فروش"))  # ZWNJ stays
 
     def test_logo_is_shipped_and_loaded(self):
         self.assertTrue(self.story.LOGO_PATH.is_file())
@@ -253,8 +291,23 @@ class StoryTest(unittest.TestCase):
         self.assertIsNone(self.story.parse_story_count("سلام"))
 
     def test_sends_the_requested_number_of_full_size_story_files_one_by_one(self):
+        calls = self.send_stories(fail_first=False)
+        # Only files: Telegram would shrink a photo to 720×1280.
+        self.assertEqual([c for c in calls if c[0] in ("photo", "file")], [
+            ("file", "story-273.jpg", (1080, 1920), "🏡 ۸۱ متر، ۲ خواب | ولیعصر جنوبی"),
+            ("file", "story-274.jpg", (1080, 1920), "🏡 ۸۱ متر، ۲ خواب | ولیعصر جنوبی"),
+        ])
+        self.assertEqual(calls[-1], ("message", "✅ ۲ استوری ساخته شد (۱۰ تا ۱۲ میلیارد)."))
+
+    def test_a_story_that_fails_to_send_is_not_counted(self):
+        calls = self.send_stories(fail_first=True)
+        self.assertEqual([c[1] for c in calls if c[0] == "file"], ["story-274.jpg", "story-275.jpg"])
+        self.assertEqual(calls[-1], ("message", "✅ ۲ استوری ساخته شد (۱۰ تا ۱۲ میلیارد)."))
+
+    def send_stories(self, fail_first):
         data = photo((90, 120, 160))
         calls = []
+        self_test = self
 
         class File:
             async def download_as_bytearray(self):
@@ -278,7 +331,12 @@ class StoryTest(unittest.TestCase):
             async def send_photo(self, *args, **kwargs):
                 calls.append(("photo",))
 
-            async def send_document(self, chat_id, document, filename, caption):
+            async def send_document(self, chat_id, document, filename, caption, **timeouts):
+                if fail_first and not any(c[0] == "failed" for c in calls):
+                    calls.append(("failed",))
+                    raise TimeoutError("Timed out")
+                # A big file gets more time than Telegram's 5s default.
+                self_test.assertEqual(timeouts["read_timeout"], 60)
                 size = Image.open(document).size
                 calls.append(("file", filename, size, caption.splitlines()[0]))
 
@@ -298,13 +356,8 @@ class StoryTest(unittest.TestCase):
                 mock.patch.dict("os.environ", {"OPENAI_API_KEY": ""}):
             asyncio.run(self.story.make_stories(Bot(), 7, 2, (10, 12)))
         pick.assert_called_once_with(2, 10, 12)
-        self.assertEqual(len(set(layouts)), 2)
-        # Only files: Telegram would shrink a photo to 720×1280.
-        self.assertEqual([c for c in calls if c[0] in ("photo", "file")], [
-            ("file", "story-273.jpg", (1080, 1920), "🏡 ۸۱ متر، ۲ خواب | ولیعصر جنوبی"),
-            ("file", "story-274.jpg", (1080, 1920), "🏡 ۸۱ متر، ۲ خواب | ولیعصر جنوبی"),
-        ])
-        self.assertEqual(calls[-1], ("message", "✅ ۲ استوری ساخته شد (۱۰ تا ۱۲ میلیارد)."))
+        self.assertEqual(len(set(layouts)), 2)  # a failed send leaves its layout to the next
+        return calls
 
     def test_flow_asks_count_then_price(self):
         started = []

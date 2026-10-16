@@ -14,6 +14,7 @@ photos are never generated or altered.
 
 import asyncio
 import io
+import itertools
 import json
 import logging
 import os
@@ -254,12 +255,22 @@ FEATURE_LABELS = {
     "wall_bed": "تخت‌خواب دیواری",
 }
 _UNSAFE_DETAIL = re.compile(r"@|https?:|t\.me|www\.|[0-9۰-۹٠-٩]{5,}")
+# Emoji and pictographs the font has no glyph for: drawn as empty boxes.
+# (ZWNJ, used in Persian words, is kept.)
+_UNDRAWABLE = re.compile(
+    "[\U0001F000-\U0001FAFF\u2190-\u21FF\u2300-\u27BF\u2900-\u297F\u2B00-\u2BFF"
+    "\uFE00-\uFE0F\u200D\u20E3\u203C\u2049\u2122\u2139\u00A9\u00AE\u3030\u303D]"
+)
+
+
+def _drawable(value):
+    return re.sub(r"\s+", " ", _UNDRAWABLE.sub("", str(value or ""))).strip(" :-•|")
 
 
 def _short_detail(value, limit):
     """A stored value short and clean enough to draw, else None."""
 
-    text = re.sub(r"\s+", " ", str(value or "")).strip(" :-•")
+    text = _drawable(value)
     if not text or len(text) > limit or _UNSAFE_DETAIL.search(text):
         return None
     return text
@@ -352,7 +363,7 @@ def story_titles(listing):
     the district as the tag and «۱۵۱ متر، ۳ خواب» as the headline.
     """
 
-    district = str(listing.get("district") or "").strip()
+    district = _drawable(listing.get("district"))
     parts = []
     if listing.get("area_m2"):
         parts.append(f"{persian_digits(int(Decimal(str(listing['area_m2']))))} متر")
@@ -478,9 +489,7 @@ CHIP_HEIGHT = 70
 CHIP_STEP = 86
 CHECK_SPACE = 52
 BLOCK_GAP = 30
-# A photo fills its box only while at least this share of it stays visible;
-# otherwise it is shown whole on a blurred copy of itself.
-MIN_PHOTO_SHOWN = 0.6
+PHOTO_GAP = 10
 
 
 def _font(path, size):
@@ -490,7 +499,7 @@ def _font(path, size):
 
 
 def _shape(text):
-    return get_display(arabic_reshaper.reshape(text))
+    return get_display(arabic_reshaper.reshape(_UNDRAWABLE.sub("", text).strip()))
 
 
 def _wrap(text, font, max_width, max_lines):
@@ -581,22 +590,91 @@ def _glass(canvas, boxes, radius):
 
 
 def _paste_photo(canvas, image, box):
-    """
-    The photo filling box, or, when that would cut away too much of it (a
-    tall photo in a wide box), the whole photo on a blurred copy of itself.
-    """
+    """The photo filling the whole box, cropped around its centre."""
 
     left, top, right, bottom = box
-    size = (right - left, bottom - top)
-    box_ratio = size[0] / size[1]
+    canvas.paste(ImageOps.fit(image, (right - left, bottom - top), Image.LANCZOS), (left, top))
+
+
+def _crop_loss(image, box):
+    """The share of the photo cut away when it fills box."""
+
+    box_ratio = (box[2] - box[0]) / (box[3] - box[1])
     photo_ratio = image.width / image.height
-    photo = ImageOps.fit(image, size, Image.LANCZOS)
-    if min(box_ratio, photo_ratio) / max(box_ratio, photo_ratio) < MIN_PHOTO_SHOWN:
-        photo = Image.blend(photo.filter(ImageFilter.GaussianBlur(28)),
-                            Image.new("RGB", size, BACKGROUND), 0.35)
-        whole = ImageOps.contain(image, size, Image.LANCZOS)
-        photo.paste(whole, ((size[0] - whole.width) // 2, (size[1] - whole.height) // 2))
-    canvas.paste(photo, (left, top))
+    return 1 - min(box_ratio, photo_ratio) / max(box_ratio, photo_ratio)
+
+
+def _photo_grids(area, count):
+    """Ways to tile area with up to count photos, each biggest box first."""
+
+    left, top, right, bottom = area
+    width, height, gap = right - left, bottom - top, PHOTO_GAP
+    grids = {"single": [area]}
+    if count >= 2:
+        middle = left + (width - gap) // 2
+        split = top + (height - gap) // 2
+        grids["columns"] = [(middle + gap, top, right, bottom), (left, top, middle, bottom)]
+        grids["rows"] = [(left, top, right, split), (left, split + gap, right, bottom)]
+    if count >= 3:
+        upper = top + int(height * 0.56)
+        grids["top_pair"] = [(left, top, right, upper), (middle + gap, upper + gap, right, bottom),
+                             (left, upper + gap, middle, bottom)]
+        side = right - int(width * 0.58) - gap
+        grids["side_stack"] = [(side + gap, top, right, bottom), (left, top, side, split),
+                               (left, split + gap, side, bottom)]
+        thumbs = min(count - 1, 3)
+        strip = min(260, int(height * 0.34))
+        slot = (width - gap * (thumbs - 1)) / thumbs
+        grids["top_strip"] = [(left, top, right, bottom - strip - gap)] + [
+            (int(right - (index + 1) * slot - index * gap), bottom - strip,
+             int(right - index * (slot + gap)), bottom)
+            for index in range(thumbs)
+        ]
+    return grids
+
+
+def _choose_grid(images, area, preference):
+    """
+    (name, boxes, photo per box) of the grid in preference that crops the
+    photos least: upright photos end up in tall boxes, wide ones in wide
+    boxes. Each step down the preference, each photo left out and the first
+    photo leaving the biggest box cost a little.
+    """
+
+    images = images[:4]
+    grids = _photo_grids(area, len(images))
+    best = None
+    for rank, name in enumerate(preference):
+        boxes = grids.get(name)
+        if not boxes:
+            continue
+        areas = [(box[2] - box[0]) * (box[3] - box[1]) for box in boxes]
+        for order in itertools.permutations(range(len(images)), len(boxes)):
+            cost = sum(size * _crop_loss(images[index], box)
+                       for size, index, box in zip(areas, order, boxes)) / sum(areas)
+            cost += 0.03 * rank + 0.05 * (len(images) - len(boxes)) + (0.03 if order[0] else 0)
+            if best is None or cost < best[0]:
+                best = (cost, name, boxes, [images[index] for index in order])
+    return best[1:]
+
+
+def _paste_grid(canvas, images, area, preference):
+    _name, boxes, chosen = _choose_grid(images, area, preference)
+    for image, box in zip(chosen, boxes):
+        _paste_photo(canvas, image, box)
+
+
+def _fitted_box(image, area, min_share=0.62):
+    """A box shaped like the photo inside area, at least min_share of its width."""
+
+    left, top, right, bottom = area
+    width, height = right - left, bottom - top
+    ratio = image.width / image.height
+    box_width = max(min(width, height * ratio), width * min_share)
+    box_height = min(height, box_width / ratio)
+    box_left = left + (width - box_width) / 2
+    box_top = top + (height - box_height) / 2
+    return (int(box_left), int(box_top), int(box_left + box_width), int(box_top + box_height))
 
 
 def _paste_framed(canvas, image, box, border=14):
@@ -821,16 +899,8 @@ def _layout_classic(canvas, images, listing, tag, headline):
     width = canvas.width
     info = _info(listing, tag, headline, width)
     band_top = info["top"]
-    extra = images[1:4]
-    if extra:
-        strip, gap = 250, 10
-        _paste_photo(canvas, images[0], (0, 0, width, band_top - strip - gap))
-        slot = (width - gap * (len(extra) - 1)) / len(extra)
-        for index, image in enumerate(extra):
-            right = width - index * (slot + gap)
-            _paste_photo(canvas, image, (int(right - slot), band_top - strip, int(right), band_top))
-    else:
-        _paste_photo(canvas, images[0], (0, 0, width, band_top))
+    _paste_grid(canvas, images, (0, 0, width, band_top),
+                ("top_strip", "top_pair", "columns", "rows", "single"))
     _paste_logo(canvas, 165, left=84, plate=True)
     _info_block(canvas, info, (0, band_top, width, band_top + info["band"]))
     _cta(canvas, listing)
@@ -844,7 +914,10 @@ def _layout_magazine(canvas, images, listing, tag, headline):
     canvas.paste(Image.blend(backdrop, Image.new("RGB", (width, height), BACKGROUND), 0.6))
     info = _info(listing, tag, headline, width)
     _paste_logo(canvas, 120, center=True, top=236)
-    _paste_framed(canvas, images[0], (MARGIN, 390, width - MARGIN, info["top"] - 40))
+    # The frame takes the photo's own shape, so the photo fills it whole.
+    area = (MARGIN, 390, width - MARGIN, info["top"] - 40)
+    photo = min(images, key=lambda image: _crop_loss(image, area))
+    _paste_framed(canvas, photo, _fitted_box(photo, area))
     _info_block(canvas, info, (40, info["top"], width - 40, info["top"] + info["band"]),
                 radius=36, style="glass")
     _cta(canvas, listing, fill=TEXT, text_fill=BACKGROUND, code_fill=RED, code_text=TEXT)
@@ -855,28 +928,9 @@ def _layout_mosaic(canvas, images, listing, tag, headline):
 
     width = canvas.width
     info = _info(listing, tag, headline, width)
-    bottom, gap = info["top"], 10
-    half = (bottom - gap) // 2
-    tall = min(images, key=lambda image: image.width / image.height)
-    if len(images) >= 3 and tall.width < tall.height:
-        # An upright photo in a tall column beside two stacked ones.
-        rest = [image for image in images if image is not tall]
-        side = width - int(width * 0.58) - gap
-        _paste_photo(canvas, tall, (side + gap, 0, width, bottom))
-        _paste_photo(canvas, rest[0], (0, 0, side, half))
-        _paste_photo(canvas, rest[1], (0, half + gap, side, bottom))
-    elif len(images) >= 3:
-        # Wide photos: one across the top, two side by side under it.
-        split = int(bottom * 0.56)
-        middle = (width - gap) // 2
-        _paste_photo(canvas, images[0], (0, 0, width, split))
-        _paste_photo(canvas, images[1], (middle + gap, split + gap, width, bottom))
-        _paste_photo(canvas, images[2], (0, split + gap, middle, bottom))
-    elif len(images) == 2:
-        _paste_photo(canvas, images[0], (0, 0, width, half))
-        _paste_photo(canvas, images[1], (0, half + gap, width, bottom))
-    else:
-        _paste_photo(canvas, images[0], (0, 0, width, bottom))
+    bottom = info["top"]
+    _paste_grid(canvas, images, (0, 0, width, bottom),
+                ("side_stack", "top_pair", "columns", "rows", "top_strip", "single"))
     _paste_logo(canvas, 150, left=84, plate=True)
     _info_block(canvas, info, (0, bottom, width, bottom + info["band"]))
     _cta(canvas, listing)
@@ -886,11 +940,11 @@ def _layout_cinematic(canvas, images, listing, tag, headline):
     """Full-bleed photo under a dark fade, a red ribbon title, a code disc."""
 
     width, height = canvas.size
-    # The most upright photo fills the tall story best.
-    canvas.paste(ImageOps.fit(min(images, key=lambda image: image.width / image.height),
-                              (width, height), Image.LANCZOS))
     info = _info(listing, tag, headline, width)
     top = info["top"]
+    # The photo fills everything down to just under the title.
+    area = (0, 0, width, min(height, top + 160))
+    _paste_photo(canvas, min(images, key=lambda image: _crop_loss(image, area)), area)
 
     # Darken the top for the logo and everything from the title down for the text.
     fade = Image.new("L", (width, height), 0)
@@ -1043,15 +1097,26 @@ async def make_stories(bot, chat_id, count, price_range=None, rng=random):
             except ValueError:
                 continue
 
-            made += 1
             # Sent as a file: Telegram shrinks photos to 720×1280, the file
-            # stays exactly 1080×1920 for Instagram.
-            await bot.send_document(
-                chat_id,
-                document=io.BytesIO(image),
-                filename=f"story-{short_code(listing)}.jpg",
-                caption=caption[:1024],
-            )
+            # stays exactly 1080×1920 for Instagram. Uploading it can take a
+            # while when the bot is busy editing the channel.
+            try:
+                await bot.send_document(
+                    chat_id,
+                    document=io.BytesIO(image),
+                    filename=f"story-{short_code(listing)}.jpg",
+                    caption=caption[:1024],
+                    read_timeout=60,
+                    write_timeout=60,
+                    connect_timeout=10,
+                    pool_timeout=30,
+                )
+            except Exception:
+                logging.exception(
+                    "Instagram story could not be sent: property_id=%s", listing["id"]
+                )
+                continue
+            made += 1
             logging.info(
                 "Instagram story created: property_id=%s unit_code=%s layout=%s",
                 listing["id"],
