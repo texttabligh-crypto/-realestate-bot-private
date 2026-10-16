@@ -1,9 +1,10 @@
 """Settings › «📸 استوری اینستاگرام» makes stories for random live listings.
 
 The owner picks how many and a price range; each story uses the listing's
-real photos and own facts in one of four layouts, OpenAI only writes the
-kicker/headline/caption, the price and the channel handle are left out, and
-the call to action asks viewers to comment the unit code.
+real photos and own facts in one of four layouts with a factual title (no
+slogan), OpenAI only writes the caption, the price and the channel handle are
+left out, the call to action asks viewers to comment the short code, and every
+story is sent as a 1080×1920 file.
 """
 import asyncio
 import io
@@ -62,7 +63,7 @@ def near(pixel, color, tolerance=16):
 LISTING = dict(
     id=295, unit_code="27310", district="ولیعصر جنوبی", area_m2=81, bedrooms=2,
     floor_text="5 از 4", build_year=1390, has_parking=False, has_elevator=True,
-    has_storage=True,
+    has_storage=True, internal_sequence=273,
 )
 PRICE_WORDS = re.compile("میلیارد|میلیون|تومان")
 
@@ -77,27 +78,59 @@ class StoryTest(unittest.TestCase):
             "ولیعصر جنوبی", "۸۱ متر", "۲ خواب", "طبقه ۵ از ۴", "ساخت ۱۳۹۰", "آسانسور", "انباری",
         ])
         self.assertEqual(self.story.call_to_action(LISTING),
-                         "برای دریافت قیمت و مشخصات، عدد ۲۷۳۱۰ رو کامنت کنید")
+                         "برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو کامنت کنید")
 
-    def test_templates_skip_lines_needing_missing_facts(self):
+    def test_short_code_is_the_sequence(self):
+        self.assertEqual(self.story.short_code(LISTING), "273")
+        self.assertEqual(self.story.short_code(dict(LISTING, internal_sequence=None, unit_code="22537")), "225")
+        self.assertEqual(self.story.short_code(dict(LISTING, internal_sequence=1004)), "1004")
+
+    def test_title_is_the_listing_facts_not_a_slogan(self):
+        self.assertEqual(self.story.story_titles(LISTING), ("ولیعصر جنوبی", "۸۱ متر، ۲ خواب"))
+        self.assertEqual(self.story.story_chips(LISTING),
+                         ["طبقه ۵ از ۴", "ساخت ۱۳۹۰", "آسانسور", "انباری"])
+        self.assertEqual(self.story.story_titles(dict(LISTING, district=None)), ("تبریز", "۸۱ متر، ۲ خواب"))
+        self.assertEqual(self.story.story_titles(dict(LISTING, area_m2=None, bedrooms=None)),
+                         ("تبریز", "ولیعصر جنوبی"))
         bare = dict(LISTING, district=None, area_m2=None, bedrooms=None)
-        for seed in range(30):
-            text = self.story.fallback_story_text(bare, random.Random(seed))
-            self.assertNotIn("{", text["kicker"] + text["headline"])
-            self.assertIn("عدد ۲۷۳۱۰ رو کامنت کنید", text["caption"])
-            self.assertIsNone(PRICE_WORDS.search(text["caption"]))
+        self.assertEqual(self.story.story_titles(bare), ("تبریز", "فایل ویژه"))
+        source = (APP / "instagram_story.py").read_text(encoding="utf-8")
+        self.assertNotIn("KICKERS", source)
+        self.assertNotIn("HEADLINES", source)
+        self.assertNotIn("رو ببین", source)
+
+    def test_fallback_caption_is_factual(self):
+        self.assertEqual(self.story.fallback_caption(LISTING), "\n".join([
+            "🏡 ۸۱ متر، ۲ خواب | ولیعصر جنوبی",
+            "🔑 طبقه ۵ از ۴ • ساخت ۱۳۹۰ • آسانسور • انباری",
+            "",
+            "💬 برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو کامنت کنید",
+            "",
+            "#ولیعصر_جنوبی #املاک_تبریز #خرید_آپارتمان #تبریز #خانه_رویایی",
+        ]))
+        bare = dict(LISTING, district=None, area_m2=None, bedrooms=None, floor_text=None,
+                    build_year=None, has_elevator=False, has_storage=False)
+        caption = self.story.fallback_caption(bare)
+        self.assertNotIn("🔑", caption)
+        self.assertIn("عدد ۲۷۳ رو کامنت کنید", caption)
+        self.assertIsNone(PRICE_WORDS.search(caption))
 
     def test_four_layouts_render_full_hd_stories(self):
-        cta_left = {"classic": 60, "card": 86, "grid": 60, "overlay": 60}
+        cta_left = {"diagonal": 60, "magazine": 60, "mosaic": 60, "cinematic": 60}
         self.assertEqual([name for name, _render, _fill in self.story.STORY_LAYOUTS], list(cta_left))
         for photos in ([photo((70, 110, 150))], [photo((70, 110, 150))] * 4):
             for index, (name, _render, cta_fill) in enumerate(self.story.STORY_LAYOUTS):
                 image = Image.open(io.BytesIO(self.story.render_story(
-                    photos, LISTING, "پیشنهاد ویژه ولیعصر جنوبی", "نور، فضا، ولیعصر جنوبی", index)))
+                    photos, LISTING, *self.story.story_titles(LISTING), index)))
                 self.assertEqual(image.size, (1080, 1920), name)
                 # The call to action sits above Instagram's reply bar.
                 self.assertTrue(near(image.getpixel((cta_left[name] + 14, 1585)), cta_fill), name)
                 self.assertFalse(near(image.getpixel((cta_left[name] + 14, 1700)), cta_fill), name)
+
+    def test_logo_is_shipped_and_loaded(self):
+        self.assertTrue(self.story.LOGO_PATH.is_file())
+        self.assertEqual(self.story.LOGO_PATH.parent.name, "fonts")  # deployment copies app/fonts
+        self.assertEqual(self.story._logo(170).height, 170)
 
     def test_no_channel_handle_is_drawn(self):
         source = (APP / "instagram_story.py").read_text(encoding="utf-8")
@@ -110,32 +143,39 @@ class StoryTest(unittest.TestCase):
 
     def openai(self, answer):
         body = json.dumps({"output": [{"type": "message", "content": [
-            {"type": "output_text", "text": json.dumps(answer, ensure_ascii=False)}]}]}).encode()
+            {"type": "output_text", "text": answer}]}]}).encode()
         response = mock.MagicMock()
         response.__enter__.return_value.read.return_value = body
         with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "test"}), \
                 mock.patch.object(self.story.urllib.request, "urlopen", return_value=response) as call:
-            text = self.story.openai_story_text(LISTING, random.Random(1))
-        return text, json.loads(call.call_args[0][0].data.decode())
+            caption = self.story.openai_caption(LISTING, random.Random(1))
+        return caption, json.loads(call.call_args[0][0].data.decode())
 
-    def test_openai_copy_keeps_price_out_and_the_call_to_action_in(self):
-        text, sent = self.openai({
-            "kicker": "لوکس در ولیعصر ✨",
-            "headline": "خونه‌ای که منتظرش بودی 🏡",
-            "caption": "خانه‌ای دنج و نورگیر\nفقط ۱۰ میلیارد تومان\n#تبریز",
-        })
-        self.assertEqual(text["kicker"], "لوکس در ولیعصر")
-        self.assertEqual(text["headline"], "خونه‌ای که منتظرش بودی")
-        self.assertIsNone(PRICE_WORDS.search(text["caption"]))
-        self.assertTrue(text["caption"].endswith("💬 برای دریافت قیمت و مشخصات، عدد ۲۷۳۱۰ رو کامنت کنید"))
+    def test_openai_caption_keeps_price_out_and_the_call_to_action_in(self):
+        caption, sent = self.openai("۸۱ متر، ۲ خواب در ولیعصر جنوبی\nفقط ۱۰ میلیارد تومان\n#تبریز")
+        self.assertEqual(caption, "\n".join([
+            "۸۱ متر، ۲ خواب در ولیعصر جنوبی",
+            "#تبریز",
+            "",
+            "💬 برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو کامنت کنید",
+        ]))
         facts = json.loads(sent["input"])
         self.assertEqual(facts["facts"][1], "۸۱ متر")
+        self.assertEqual(facts["call_to_action"], "برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو کامنت کنید")
         self.assertNotIn("price", sent["input"])
+        self.assertIn("Do not open with a slogan", sent["instructions"])
 
-    def test_price_in_headline_falls_back_to_templates(self):
-        text, _sent = self.openai({"kicker": "فقط ۱۰ میلیارد", "headline": "ارزان", "caption": ""})
-        self.assertIsNone(PRICE_WORDS.search(text["kicker"] + text["headline"]))
-        self.assertIn("عدد ۲۷۳۱۰ رو کامنت کنید", text["caption"])
+    def test_openai_caption_with_the_code_is_kept_as_written(self):
+        written = "۸۱ متری نورگیر\n💬 عدد ۲۷۳ رو کامنت کنید"
+        self.assertEqual(self.openai(written)[0], written)
+
+    def test_empty_or_failed_openai_caption_falls_back_to_the_template(self):
+        self.assertEqual(self.openai("فقط ۱۰ میلیارد")[0], self.story.fallback_caption(LISTING))
+        with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "test"}), \
+                mock.patch.object(self.story.urllib.request, "urlopen", side_effect=OSError("down")):
+            self.assertEqual(self.story.openai_caption(LISTING), self.story.fallback_caption(LISTING))
+        with mock.patch.dict("os.environ", {"OPENAI_API_KEY": ""}):
+            self.assertEqual(self.story.openai_caption(LISTING), self.story.fallback_caption(LISTING))
 
     def test_price_range(self):
         parse = self.story.parse_price_range
@@ -159,7 +199,7 @@ class StoryTest(unittest.TestCase):
         self.assertIsNone(self.story.parse_story_count("11"))
         self.assertIsNone(self.story.parse_story_count("سلام"))
 
-    def test_sends_the_requested_number_of_stories_one_by_one(self):
+    def test_sends_the_requested_number_of_full_size_story_files_one_by_one(self):
         data = photo((90, 120, 160))
         calls = []
 
@@ -182,18 +222,21 @@ class StoryTest(unittest.TestCase):
             async def get_file(self, file_id):
                 return File()
 
-            async def send_photo(self, chat_id, photo, caption):
-                calls.append(("photo", caption.splitlines()[-1]))
+            async def send_photo(self, *args, **kwargs):
+                calls.append(("photo",))
 
             async def send_document(self, chat_id, document, filename, caption):
-                calls.append(("file", filename))
+                size = Image.open(document).size
+                calls.append(("file", filename, size, caption.splitlines()[0]))
 
-        listings = [dict(LISTING, id=i, unit_code=str(27310 + i), photo_file_ids=["a", "b"]) for i in range(4)]
+        listings = [dict(LISTING, id=i, unit_code=f"{273 + i}10", internal_sequence=273 + i,
+                         photo_file_ids=["a", "b"]) for i in range(4)]
         layouts = []
         real_render = self.story.render_story
 
         def render(photos, listing, kicker, headline, layout=0):
             layouts.append(layout % 4)
+            self.assertEqual((kicker, headline), ("ولیعصر جنوبی", "۸۱ متر، ۲ خواب"))
             return real_render(photos, listing, kicker, headline, layout)
 
         with mock.patch.object(self.story, "random_story_listings", return_value=listings) as pick, \
@@ -203,11 +246,10 @@ class StoryTest(unittest.TestCase):
             asyncio.run(self.story.make_stories(Bot(), 7, 2, (10, 12)))
         pick.assert_called_once_with(2, 10, 12)
         self.assertEqual(len(set(layouts)), 2)
+        # Only files: Telegram would shrink a photo to 720×1280.
         self.assertEqual([c for c in calls if c[0] in ("photo", "file")], [
-            ("photo", "#ولیعصر_جنوبی #املاک_تبریز #خرید_آپارتمان #تبریز #خانه_رویایی"),
-            ("file", "story-27310.jpg"),
-            ("photo", "#ولیعصر_جنوبی #املاک_تبریز #خرید_آپارتمان #تبریز #خانه_رویایی"),
-            ("file", "story-27311.jpg"),
+            ("file", "story-273.jpg", (1080, 1920), "🏡 ۸۱ متر، ۲ خواب | ولیعصر جنوبی"),
+            ("file", "story-274.jpg", (1080, 1920), "🏡 ۸۱ متر، ۲ خواب | ولیعصر جنوبی"),
         ])
         self.assertEqual(calls[-1], ("message", "✅ ۲ استوری ساخته شد (۱۰ تا ۱۲ میلیارد)."))
 
@@ -255,6 +297,9 @@ class WiringTest(unittest.TestCase):
         self.assertLess(bot.index("# CRM_ACCESS_GUARD_V1"),
                         bot.index('if action == INSTAGRAM_STORY_ACTION or action.startswith(f"{INSTAGRAM_STORY_ACTION}_"):'))
         self.assertIn("allowed=check_action_access(session, INSTAGRAM_STORY_ACTION)", bot)
+        # The unit search finds a listing by the short code the stories ask for.
+        self.assertEqual(bot.count("OR internal_sequence::text = %s"), 1)
+        self.assertEqual(bot.count("OR p.internal_sequence::text = %s"), 1)
 
 
 if __name__ == "__main__":
