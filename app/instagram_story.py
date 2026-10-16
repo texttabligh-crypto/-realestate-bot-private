@@ -29,6 +29,7 @@ from bidi.algorithm import get_display
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from property_parser import KNOWN_DISTRICTS, is_feature_line_district, normalize_text
 from publisher import db_connect
 
 INSTAGRAM_STORY_ACTION = "insta_story"
@@ -85,7 +86,7 @@ STYLE_HINTS = (
 _LISTING_KEYS = (
     "id", "unit_code", "district", "area_m2", "bedrooms", "floor_text",
     "build_year", "has_parking", "has_elevator", "has_storage",
-    "internal_sequence", "direction", "address_text",
+    "internal_sequence", "direction", "address_text", "raw_text",
 )
 
 
@@ -111,7 +112,8 @@ def random_story_listings(count, price_min=None, price_max=None):
                 SELECT
                     p.id, p.unit_code, p.district, p.area_m2, p.bedrooms,
                     p.floor_text, p.build_year, p.has_parking, p.has_elevator,
-                    p.has_storage, p.internal_sequence, p.direction, p.address_text
+                    p.has_storage, p.internal_sequence, p.direction, p.address_text,
+                    p.raw_text
                 FROM properties p
                 WHERE p.status = 'ACTIVE'
                   AND p.published_message_id IS NOT NULL
@@ -342,9 +344,9 @@ def story_facts(listing):
     """All the listing's own facts, for the caption; never the price."""
 
     facts = []
-    location = story_location(listing)
-    if location:
-        facts.append(location)
+    region = story_region(listing)
+    if region:
+        facts.append(region)
     if listing.get("area_m2"):
         facts.append(f"{persian_digits(int(Decimal(str(listing['area_m2']))))} متر")
     if listing.get("bedrooms") is not None:
@@ -358,30 +360,57 @@ def story_facts(listing):
 TITLE_SEPARATOR = "، "
 
 
-def story_location(listing):
-    """The location the channel post shows: the address, else the district."""
+_LOCATION_LABEL = re.compile(r"^(?:منطقه|محله|واحد|آدرس|لوکیشن|موقعیت)\s*[:：\-]\s*")
 
-    address = _drawable(str(listing.get("address_text") or "").replace("#", " "))
-    if 0 < len(address) <= 32:
-        return address
-    return _drawable(str(listing.get("district") or "").replace("#", " "))
+
+def _known_region(text):
+    """The longest known district named in text («واحد: زعفرانیه» -> زعفرانیه)."""
+
+    text = " ".join(normalize_text(str(text or "")).replace("#", " ").replace("_", " ").split())
+    for district in sorted(KNOWN_DISTRICTS, key=len, reverse=True):
+        if district in text:
+            return district
+    return None
+
+
+def story_region(listing):
+    """
+    The region shown as «منطقه: …»: a known district named in the stored
+    district or address, else one the source post tags («#زعفرانیه»), else
+    the stored district or address itself when it is short and clean.
+    """
+
+    places = (listing.get("district"), listing.get("address_text"))
+    for value in places:
+        region = _known_region(value)
+        if region:
+            return region
+    region = _known_region(" ".join(re.findall(r"#\S+", str(listing.get("raw_text") or ""))))
+    if region:
+        return region
+    for value in places:
+        if is_feature_line_district(value):
+            continue
+        text = _LOCATION_LABEL.sub("", _drawable(str(value or "").replace("#", " ")))
+        if 0 < len(text) <= 24:
+            return text
+    return None
 
 
 def story_titles(listing):
     """
     The story's tag and headline, from the listing's facts only (no slogan):
-    the location as the tag and «۱۵۱ متر، ۳ خواب» as the headline.
+    «منطقه: مرزداران» as the tag and «۱۵۱ متر، ۳ خواب» as the headline.
     """
 
-    district = story_location(listing)
+    region = story_region(listing)
+    tag = f"منطقه: {region}" if region else "تبریز"
     parts = []
     if listing.get("area_m2"):
         parts.append(f"{persian_digits(int(Decimal(str(listing['area_m2']))))} متر")
     if listing.get("bedrooms") is not None:
         parts.append(f"{persian_digits(listing['bedrooms'])} خواب")
-    if parts:
-        return district or "تبریز", TITLE_SEPARATOR.join(parts)
-    return "تبریز", district or "فایل ویژه"
+    return tag, TITLE_SEPARATOR.join(parts) or "فایل ویژه"
 
 
 def short_code(listing):
@@ -405,9 +434,9 @@ def call_to_action(listing):
 
 def _hashtags(listing):
     tags = ["#املاک_تبریز", "#خرید_آپارتمان", "#تبریز", "#خانه_رویایی"]
-    district = _drawable(str(listing.get("district") or "").replace("#", " "))
-    if district:
-        tags.insert(0, "#" + re.sub(r"\s+", "_", district))
+    region = story_region(listing)
+    if region:
+        tags.insert(0, "#" + re.sub(r"\s+", "_", region))
     return " ".join(tags)
 
 
@@ -924,11 +953,11 @@ def _layout_magazine(canvas, images, listing, tag, headline):
     backdrop = ImageOps.fit(images[0], (width, height), Image.LANCZOS).filter(ImageFilter.GaussianBlur(30))
     canvas.paste(Image.blend(backdrop, Image.new("RGB", (width, height), BACKGROUND), 0.6))
     info = _info(listing, tag, headline, width)
-    _paste_logo(canvas, 120, center=True, top=236)
-    # The frame takes the photo's own shape, so the photo fills it whole.
-    area = (MARGIN, 390, width - MARGIN, info["top"] - 40)
+    _paste_logo(canvas, 110, center=True, top=222)
+    # The frame takes the photo's shape, but stays wide so the photo is big.
+    area = (40, 356, width - 40, info["top"] - 36)
     photo = min(images, key=lambda image: _crop_loss(image, area))
-    _paste_framed(canvas, photo, _fitted_box(photo, area))
+    _paste_framed(canvas, photo, _fitted_box(photo, area, min_share=0.9))
     _info_block(canvas, info, (40, info["top"], width - 40, info["top"] + info["band"]),
                 radius=36, style="glass")
     _cta(canvas, listing, fill=TEXT, text_fill=BACKGROUND, code_fill=RED, code_text=TEXT)
