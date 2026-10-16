@@ -24,6 +24,7 @@ from telegram import (
 from crm_panel import parse_visit_datetime, TEHRAN
 from publisher import publish_property
 from visit_ops_group import get_visit_ops_target, telegram_thread_kwargs
+from sales_assistant import assistant_turn
 from listing_offer import (
     LISTING_OFFER_STATE,
     SIMILAR_CALLBACK_PREFIX,
@@ -2152,6 +2153,26 @@ async def handle_customer_text(update, context):
             return True
 
         from crm_campaign_hub import escalate_customer_question
+
+        # No rule answered: the sales assistant replies from the listing
+        # facts, and hands the question to an advisor when it can't.
+        _show_typing(update, context)
+        try:
+            turn = await asyncio.to_thread(assistant_turn, user.id, user.first_name, text)
+        except Exception:
+            logging.exception("Sales assistant failed: user=%s", user.id)
+            turn = None
+        if turn:
+            await update.message.reply_text(turn["reply"], disable_web_page_preview=True)
+            if turn["action"] == "visit":
+                from visit_flow import start_visit_request
+                await start_visit_request(update, context, turn["listing"]["id"])
+            elif turn["action"] == "search":
+                await _offer_search_confirmation(update, context, turn["filters"], text, customer_id)
+            elif turn["action"] == "handoff":
+                await escalate_customer_question(context.bot, user, customer_id, text)
+            return True
+
         if await escalate_customer_question(
             context.bot, user, customer_id, text
         ):
