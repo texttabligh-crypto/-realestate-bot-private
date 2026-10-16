@@ -1,10 +1,11 @@
 """Settings › «📸 استوری اینستاگرام» makes stories for random live listings.
 
 The owner picks how many and a price range; each story uses the listing's
-real photos and own facts in one of four layouts with a factual title (no
-slogan), OpenAI only writes the caption, the price and the channel handle are
-left out, the call to action asks viewers to comment the short code, and every
-story is sent as a 1080×1920 file.
+real photos and own facts in one of four layouts: a red title band with a
+factual title (no slogan), tiles for the other facts, checked amenities, and
+the photos filling whatever room is left. OpenAI only writes the caption, the
+price and the channel handle are left out, the call to action asks viewers to
+comment the short code, and every story is sent as a 1080×1920 file.
 """
 import asyncio
 import io
@@ -87,8 +88,6 @@ class StoryTest(unittest.TestCase):
 
     def test_title_is_the_listing_facts_not_a_slogan(self):
         self.assertEqual(self.story.story_titles(LISTING), ("ولیعصر جنوبی", "۸۱ متر، ۲ خواب"))
-        self.assertEqual(self.story.story_chips(LISTING),
-                         ["طبقه ۵ از ۴", "ساخت ۱۳۹۰", "آسانسور", "انباری"])
         self.assertEqual(self.story.story_titles(dict(LISTING, district=None)), ("تبریز", "۸۱ متر، ۲ خواب"))
         self.assertEqual(self.story.story_titles(dict(LISTING, area_m2=None, bedrooms=None)),
                          ("تبریز", "ولیعصر جنوبی"))
@@ -99,10 +98,36 @@ class StoryTest(unittest.TestCase):
         self.assertNotIn("HEADLINES", source)
         self.assertNotIn("رو ببین", source)
 
+    def test_tiles_and_amenities_add_the_listing_details(self):
+        self.assertEqual(self.story.story_stats(LISTING), [
+            ("۵ از ۴", "طبقه", "طبقه ۵ از ۴"), ("۱۳۹۰", "سال ساخت", "ساخت ۱۳۹۰"),
+        ])
+        self.assertEqual(self.story.story_amenities(LISTING), ["آسانسور", "انباری"])
+        rich = dict(LISTING, direction="جنوبی", attributes=[
+            ("units_per_floor", "2"), ("deed_type", "تک برگ"),
+            ("master_bedroom", "✨ خواب مستر با سرویس"), ("lobby", "لابی مجلل"),
+            ("property_condition", "کلید نخورده"), ("open_view", "باز"),
+            ("installations", "کامل"), ("source_photo_authenticity", "واقعی"),
+        ])
+        self.assertEqual([value for value, _label, _text in self.story.story_stats(rich)],
+                         ["۵ از ۴", "۱۳۹۰", "۲", "جنوبی"])  # four tiles at most
+        self.assertEqual(self.story.story_amenities(rich), [
+            "آسانسور", "انباری", "کلید نخورده", "ویو باز", "فول نصبیات", "خواب مستر", "لابی",
+        ])
+        self.assertIn("سند تک برگ", self.story.story_facts(dict(rich, floor_text=None)))
+
+    def test_details_that_could_carry_contact_text_are_dropped(self):
+        risky = dict(LISTING, floor_text=None, build_year=None, direction="تماس 09141234567",
+                     attributes=[("deed_type", "@agency"), ("property_condition", "x" * 40),
+                                 ("units_per_floor", "دو")])
+        self.assertEqual(self.story.story_stats(risky), [])
+        self.assertEqual(self.story.story_amenities(risky), ["آسانسور", "انباری"])
+
     def test_fallback_caption_is_factual(self):
         self.assertEqual(self.story.fallback_caption(LISTING), "\n".join([
             "🏡 ۸۱ متر، ۲ خواب | ولیعصر جنوبی",
-            "🔑 طبقه ۵ از ۴ • ساخت ۱۳۹۰ • آسانسور • انباری",
+            "🏢 طبقه ۵ از ۴ • ساخت ۱۳۹۰",
+            "✅ آسانسور • انباری",
             "",
             "💬 برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو کامنت کنید",
             "",
@@ -111,21 +136,49 @@ class StoryTest(unittest.TestCase):
         bare = dict(LISTING, district=None, area_m2=None, bedrooms=None, floor_text=None,
                     build_year=None, has_elevator=False, has_storage=False)
         caption = self.story.fallback_caption(bare)
-        self.assertNotIn("🔑", caption)
+        self.assertEqual(caption.split("\n\n")[0], "🏡 فایل ویژه | تبریز")
         self.assertIn("عدد ۲۷۳ رو کامنت کنید", caption)
         self.assertIsNone(PRICE_WORDS.search(caption))
 
     def test_four_layouts_render_full_hd_stories(self):
-        cta_left = {"diagonal": 60, "magazine": 60, "mosaic": 60, "cinematic": 60}
-        self.assertEqual([name for name, _render, _fill in self.story.STORY_LAYOUTS], list(cta_left))
-        for photos in ([photo((70, 110, 150))], [photo((70, 110, 150))] * 4):
-            for index, (name, _render, cta_fill) in enumerate(self.story.STORY_LAYOUTS):
-                image = Image.open(io.BytesIO(self.story.render_story(
-                    photos, LISTING, *self.story.story_titles(LISTING), index)))
-                self.assertEqual(image.size, (1080, 1920), name)
-                # The call to action sits above Instagram's reply bar.
-                self.assertTrue(near(image.getpixel((cta_left[name] + 14, 1585)), cta_fill), name)
-                self.assertFalse(near(image.getpixel((cta_left[name] + 14, 1700)), cta_fill), name)
+        story = self.story
+        self.assertEqual([name for name, _render, _fill in story.STORY_LAYOUTS],
+                         ["classic", "magazine", "mosaic", "cinematic"])
+        cta_middle = story.CTA_TOP + story.CTA_HEIGHT // 2
+        # The call to action ends at least 250px above the bottom, clear of
+        # Instagram's comment field.
+        self.assertLessEqual(story.CTA_TOP + story.CTA_HEIGHT, 1920 - 250)
+        for listing in (LISTING, dict(LISTING, floor_text=None, build_year=None, has_elevator=False)):
+            info = story._info(listing, *story.story_titles(listing), 1080)
+            for photos in ([photo((70, 110, 150))], [photo((70, 110, 150))] * 4):
+                for index, (name, _render, cta_fill) in enumerate(story.STORY_LAYOUTS):
+                    image = Image.open(io.BytesIO(story.render_story(
+                        photos, listing, *story.story_titles(listing), index)))
+                    self.assertEqual(image.size, (1080, 1920), name)
+                    self.assertTrue(near(image.getpixel((story.MARGIN + 14, cta_middle)), cta_fill), name)
+                    self.assertFalse(near(image.getpixel((story.MARGIN + 14, 1700)), cta_fill), name)
+                    if name in ("classic", "mosaic"):
+                        # A straight red band right under the photos.
+                        self.assertTrue(near(image.getpixel((8, info["top"] + 8)), story.RED_DEEP), name)
+                        self.assertTrue(near(image.getpixel((1072, info["top"] + 8)), story.RED), name)
+                        self.assertTrue(near(image.getpixel((300, info["top"] - 8)), (70, 110, 150)), name)
+
+    def test_photos_fill_the_room_the_details_leave(self):
+        story = self.story
+        few = dict(LISTING, floor_text=None, build_year=None, has_elevator=False, has_storage=False)
+        rich = dict(LISTING, direction="جنوبی", attributes=[("units_per_floor", "2"), ("lobby", "لابی")])
+        tops = [story._info(item, *story.story_titles(item), 1080)["top"] for item in (few, LISTING, rich)]
+        self.assertEqual(tops, sorted(tops, reverse=True))
+        self.assertGreater(tops[0] - tops[2], 200)
+
+    def test_tall_photo_in_a_wide_box_is_shown_whole(self):
+        canvas = Image.new("RGB", (1000, 300))
+        tall = Image.new("RGB", (300, 600), (200, 30, 30))
+        self.story._paste_photo(canvas, tall, (0, 0, 1000, 300))
+        self.assertTrue(near(canvas.getpixel((500, 150)), (200, 30, 30)))
+        self.assertFalse(near(canvas.getpixel((20, 150)), (200, 30, 30)))
+        self.story._paste_photo(canvas, Image.new("RGB", (1600, 600), (200, 30, 30)), (0, 0, 1000, 300))
+        self.assertTrue(near(canvas.getpixel((20, 150)), (200, 30, 30)))
 
     def test_logo_is_shipped_and_loaded(self):
         self.assertTrue(self.story.LOGO_PATH.is_file())

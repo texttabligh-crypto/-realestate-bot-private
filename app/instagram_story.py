@@ -3,9 +3,10 @@
 Settings › «📸 استوری اینستاگرام» asks how many stories to make and for which
 price range, picks that many random live listings with photos in the range,
 and sends one 1080×1920 story per listing, rotating through four layouts.
-Each story is built from the listing's real photos and own facts, with a
-factual title (no slogan); OpenAI only writes the Instagram caption (a
-factual template is used when it is not available). The price is left out
+Each story is built from the listing's real photos and own facts: a red band
+with a factual title (no slogan), tiles for the other facts and checked
+amenities, with the photos filling whatever room is left. OpenAI only writes
+the Instagram caption (a factual template is used when it is not available). The price is left out
 on purpose: the call to action asks viewers to comment the short code. No
 source text, agency name, phone number or channel handle is ever drawn, and
 photos are never generated or altered.
@@ -44,8 +45,10 @@ STORY_MAX_COUNT = 10
 STORY_COUNT_CHOICES = (1, 3, 5, 10)
 STORY_SEND_SPACING_SECONDS = 1.5
 # Every layout keeps its call to action here, clear of Instagram's reply bar.
-CTA_TOP = 1530
-CTA_HEIGHT = 110
+# The call to action ends 260px above the bottom, clear of Instagram's
+# comment field.
+CTA_TOP = 1490
+CTA_HEIGHT = 170
 
 OPENAI_URL = os.getenv("OPENAI_RESPONSES_URL", "https://api.openai.com/v1/responses")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-6-luna")
@@ -58,8 +61,10 @@ FONT_BLACK = FONT_DIR / "IRANSansWeb_Black.ttf"
 BACKGROUND = (14, 24, 40)
 CHIP = (32, 46, 70)
 TEXT = (255, 255, 255)
-ACCENT = (226, 182, 82)
-ACCENT_TEXT = (20, 24, 32)
+MUTED = (178, 190, 208)
+RED_DEEP = (176, 18, 38)
+RED = (222, 38, 56)
+RED_TINT = (255, 216, 220)
 
 PERSIAN_DIGITS = str.maketrans("0123456789.", "۰۱۲۳۴۵۶۷۸۹٫")
 LATIN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
@@ -79,7 +84,7 @@ STYLE_HINTS = (
 _LISTING_KEYS = (
     "id", "unit_code", "district", "area_m2", "bedrooms", "floor_text",
     "build_year", "has_parking", "has_elevator", "has_storage",
-    "internal_sequence",
+    "internal_sequence", "direction",
 )
 
 
@@ -105,7 +110,7 @@ def random_story_listings(count, price_min=None, price_max=None):
                 SELECT
                     p.id, p.unit_code, p.district, p.area_m2, p.bedrooms,
                     p.floor_text, p.build_year, p.has_parking, p.has_elevator,
-                    p.has_storage, p.internal_sequence
+                    p.has_storage, p.internal_sequence, p.direction
                 FROM properties p
                 WHERE p.status = 'ACTIVE'
                   AND p.published_message_id IS NOT NULL
@@ -158,8 +163,25 @@ def random_story_listings(count, price_min=None, price_max=None):
             for property_id, file_id in cur.fetchall():
                 photos.setdefault(property_id, []).append(file_id)
 
+            # The parsed details the channel post already shows.
+            cur.execute(
+                """
+                SELECT property_id, attribute_key, attribute_value
+                FROM property_attributes
+                WHERE property_id = ANY(%s)
+                  AND is_visible = TRUE
+                  AND COALESCE(attribute_value, '') <> ''
+                ORDER BY property_id, display_order, id
+                """,
+                ([item["id"] for item in listings],),
+            )
+            details = {}
+            for property_id, key, value in cur.fetchall():
+                details.setdefault(property_id, []).append((key, value))
+
     for listing in listings:
         listing["photo_file_ids"] = photos.get(listing["id"], [])
+        listing["attributes"] = details.get(listing["id"], [])
     return listings
 
 
@@ -214,28 +236,110 @@ def persian_digits(value):
     return str(value).translate(PERSIAN_DIGITS)
 
 
-def story_facts(listing):
-    """The listing's own facts as short chips; never the price."""
+# Parsed details shown as amenities by their own name: the stored value is
+# the whole source line, which may carry other words.
+FEATURE_LABELS = {
+    "master_bedroom": "خواب مستر",
+    "balcony": "بالکن",
+    "terrace_kitchen": "آشپزخانه رو به تراس",
+    "closet_room": "کلوزت روم",
+    "lobby": "لابی",
+    "cctv": "دوربین مداربسته",
+    "luxury_installations": "فول نصبیات",
+    "open_kitchen": "آشپزخانه اوپن",
+    "wall_boiler": "پکیج دیواری",
+    "fireplace": "شومینه",
+    "cabinet_wardrobe": "کمد و کابینت",
+    "large_bathroom": "حمام بزرگ",
+    "wall_bed": "تخت‌خواب دیواری",
+}
+_UNSAFE_DETAIL = re.compile(r"@|https?:|t\.me|www\.|[0-9۰-۹٠-٩]{5,}")
 
-    chips = []
-    if listing.get("district"):
-        chips.append(str(listing["district"]).strip())
-    if listing.get("area_m2"):
-        chips.append(f"{persian_digits(int(Decimal(str(listing['area_m2']))))} متر")
-    if listing.get("bedrooms") is not None:
-        chips.append(f"{persian_digits(listing['bedrooms'])} خواب")
-    if listing.get("floor_text"):
-        chips.append(f"طبقه {persian_digits(listing['floor_text'])}")
+
+def _short_detail(value, limit):
+    """A stored value short and clean enough to draw, else None."""
+
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" :-•")
+    if not text or len(text) > limit or _UNSAFE_DETAIL.search(text):
+        return None
+    return text
+
+
+def _attributes(listing):
+    details = {}
+    for key, value in listing.get("attributes") or ():
+        details.setdefault(key, value)
+    return details
+
+
+def story_stats(listing):
+    """
+    The listing's secondary facts as (value, label, text) tiles: floor,
+    build year, units per floor, direction and deed. Area and bedrooms are
+    in the headline.
+    """
+
+    details = _attributes(listing)
+    stats = []
+    floor = _short_detail(listing.get("floor_text"), 12)
+    if floor:
+        stats.append((persian_digits(floor), "طبقه", f"طبقه {persian_digits(floor)}"))
     if listing.get("build_year"):
-        chips.append(f"ساخت {persian_digits(listing['build_year'])}")
-    for key, label in (
-        ("has_elevator", "آسانسور"),
-        ("has_parking", "پارکینگ"),
-        ("has_storage", "انباری"),
-    ):
-        if listing.get(key) is True:
-            chips.append(label)
-    return chips
+        year = persian_digits(listing["build_year"])
+        stats.append((year, "سال ساخت", f"ساخت {year}"))
+    units = str(details.get("units_per_floor") or "").translate(LATIN_DIGITS).strip()
+    if units.isdigit() and 0 < int(units) < 100:
+        stats.append((persian_digits(units), "واحد در طبقه", f"{persian_digits(units)} واحد در طبقه"))
+    direction = _short_detail(listing.get("direction"), 12)
+    if direction:
+        stats.append((direction, "جهت", direction))
+    deed = _short_detail(details.get("deed_type"), 12)
+    if deed:
+        stats.append((deed, "سند", f"سند {deed}"))
+    return stats[:4]
+
+
+def story_amenities(listing):
+    """What the home has, each as a short label: elevator, parking, lobby…"""
+
+    details = _attributes(listing)
+    items = [
+        label
+        for key, label in (
+            ("has_elevator", "آسانسور"),
+            ("has_parking", "پارکینگ"),
+            ("has_storage", "انباری"),
+        )
+        if listing.get(key) is True
+    ]
+    condition = _short_detail(details.get("property_condition"), 22)
+    if condition:
+        items.append(condition)
+    view = _short_detail(details.get("open_view"), 10)
+    if view:
+        items.append(f"ویو {view}")
+    if details.get("installations") == "کامل":
+        items.append("فول نصبیات")
+    sale_mode = _short_detail(details.get("sale_mode"), 12)
+    if sale_mode:
+        items.append(sale_mode)
+    items.extend(label for key, label in FEATURE_LABELS.items() if key in details)
+    return list(dict.fromkeys(items))
+
+
+def story_facts(listing):
+    """All the listing's own facts, for the caption; never the price."""
+
+    facts = []
+    if listing.get("district"):
+        facts.append(str(listing["district"]).strip())
+    if listing.get("area_m2"):
+        facts.append(f"{persian_digits(int(Decimal(str(listing['area_m2']))))} متر")
+    if listing.get("bedrooms") is not None:
+        facts.append(f"{persian_digits(listing['bedrooms'])} خواب")
+    facts.extend(text for _value, _label, text in story_stats(listing))
+    facts.extend(story_amenities(listing))
+    return facts
 
 
 # A Persian comma: a middle dot reads as the Persian zero «۰» («۳۰ خواب»).
@@ -257,14 +361,6 @@ def story_titles(listing):
     if parts:
         return district or "تبریز", TITLE_SEPARATOR.join(parts)
     return "تبریز", district or "فایل ویژه"
-
-
-def story_chips(listing):
-    """Facts shown as chips: everything the tag and headline do not already say."""
-
-    tag, headline = story_titles(listing)
-    shown = {tag, headline, *headline.split(TITLE_SEPARATOR)}
-    return [chip for chip in story_facts(listing) if chip not in shown]
 
 
 def short_code(listing):
@@ -295,18 +391,14 @@ def _hashtags(listing):
 
 def fallback_caption(listing):
     tag, headline = story_titles(listing)
-    chips = story_chips(listing)
-    caption = "\n".join(
-        line for line in (
-            f"🏡 {headline} | {tag}",
-            "🔑 " + " • ".join(chips) if chips else "",
-            "",
-            f"💬 {call_to_action(listing)}",
-            "",
-            _hashtags(listing),
-        )
-    )
-    return re.sub(r"\n{3,}", "\n\n", caption).strip()
+    stats = [text for _value, _label, text in story_stats(listing)]
+    amenities = story_amenities(listing)
+    facts = [f"🏡 {headline} | {tag}"]
+    if stats:
+        facts.append("🏢 " + " • ".join(stats))
+    if amenities:
+        facts.append("✅ " + " • ".join(amenities))
+    return "\n\n".join(("\n".join(facts), f"💬 {call_to_action(listing)}", _hashtags(listing)))
 
 
 def openai_caption(listing, rng=random):
@@ -375,9 +467,20 @@ Return ONLY the caption text.
 
 # The logo sits beside the fonts: deployment copies app/fonts into the image.
 LOGO_PATH = FONT_DIR / "nimat_logo.png"
-GOLD_DEEP = (198, 144, 52)
-GOLD_LIGHT = (247, 216, 134)
 _LOGO_CACHE = {}
+
+MARGIN = 60
+BAND_PADDING = 30
+TAG_LINE = 58
+HEADLINE_LINE = 112
+TILE_HEIGHT = 150
+CHIP_HEIGHT = 70
+CHIP_STEP = 86
+CHECK_SPACE = 52
+BLOCK_GAP = 30
+# A photo fills its box only while at least this share of it stays visible;
+# otherwise it is shown whole on a blurred copy of itself.
+MIN_PHOTO_SHOWN = 0.6
 
 
 def _font(path, size):
@@ -426,42 +529,6 @@ def _soft_shadow(canvas, mask, position, blur=16, opacity=0.6, offset=(0, 8)):
     canvas.paste((0, 0, 0), (left, top, left + layer.width, top + layer.height), layer)
 
 
-def _text_mask(shaped, font):
-    bbox = font.getbbox(shaped)
-    mask = Image.new("L", (int(font.getlength(shaped)) + 8, bbox[3] + 8), 0)
-    ImageDraw.Draw(mask).text((0, 0), shaped, font=font, fill=255)
-    return mask
-
-
-def _draw_rtl(canvas, draw, text, font, right, top, fill, shadow=False):
-    shaped = _shape(text)
-    left = int(right - font.getlength(shaped))
-    if shadow:
-        _soft_shadow(canvas, _text_mask(shaped, font), (left, int(top)), blur=10, opacity=0.7, offset=(0, 4))
-    draw.text((left, top), shaped, font=font, fill=fill)
-
-
-def _draw_headline(canvas, draw, lines, font, right, top, line_height, fill, highlight, shadow=False):
-    """Right-aligned headline whose last word is drawn in the highlight colour."""
-
-    space = font.getlength(" ")
-    for index, line in enumerate(lines):
-        if shadow:
-            shaped = _shape(line)
-            left = int(right - font.getlength(shaped))
-            _soft_shadow(canvas, _text_mask(shaped, font), (left, int(top)), blur=12, opacity=0.75, offset=(0, 5))
-        words = line.split()
-        x = right
-        for position, word in enumerate(words):
-            shaped = _shape(word)
-            width = font.getlength(shaped)
-            last = index == len(lines) - 1 and position == len(words) - 1
-            draw.text((x - width, top), shaped, font=font, fill=highlight if last and len(lines) + len(words) > 1 else fill)
-            x -= width + space
-        top += line_height
-    return top
-
-
 def _draw_centered(draw, text, font, box, fill):
     left, top, right, bottom = box
     shaped = _shape(text)
@@ -473,6 +540,10 @@ def _draw_centered(draw, text, font, box, fill):
         font=font,
         fill=fill,
     )
+
+
+def _draw_right(draw, text, font, right, top, bottom, fill):
+    _draw_centered(draw, text, font, (right - font.getlength(_shape(text)), top, right, bottom), fill)
 
 
 def _gradient(size, start, end):
@@ -488,35 +559,54 @@ def _rounded_mask(size, radius):
     return mask
 
 
-def _pill(canvas, box, fill, shadow=True):
+def _rounded(canvas, box, fill, radius, shadow=True):
+    """A rounded box in a colour or a (left, right) gradient."""
+
     left, top, right, bottom = box
     size = (right - left, bottom - top)
-    mask = _rounded_mask(size, size[1] // 2)
+    mask = _rounded_mask(size, radius)
     if shadow:
-        _soft_shadow(canvas, mask, (left, top), blur=18, opacity=0.55, offset=(0, 10))
+        _soft_shadow(canvas, mask, (left, top), blur=18, opacity=0.5, offset=(0, 10))
     surface = _gradient(size, *fill) if isinstance(fill[0], tuple) else Image.new("RGB", size, fill)
     canvas.paste(surface, (left, top), mask)
 
 
-def _paste_photo(canvas, image, box, radius=0):
+def _glass(canvas, boxes, radius):
+    layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    for box in boxes:
+        draw.rounded_rectangle(box, radius=radius, fill=(255, 255, 255, 40),
+                               outline=(255, 255, 255, 110), width=2)
+    canvas.paste(Image.alpha_composite(canvas.convert("RGBA"), layer).convert("RGB"))
+
+
+def _paste_photo(canvas, image, box):
+    """
+    The photo filling box, or, when that would cut away too much of it (a
+    tall photo in a wide box), the whole photo on a blurred copy of itself.
+    """
+
     left, top, right, bottom = box
-    photo = ImageOps.fit(image, (right - left, bottom - top), Image.LANCZOS)
-    if radius:
-        canvas.paste(photo, (left, top), _rounded_mask(photo.size, radius))
-    else:
-        canvas.paste(photo, (left, top))
-
-
-def _paste_framed(canvas, image, size, center, angle, border=14):
-    """A photo in a white frame, tilted by angle degrees, with a drop shadow."""
-
+    size = (right - left, bottom - top)
+    box_ratio = size[0] / size[1]
+    photo_ratio = image.width / image.height
     photo = ImageOps.fit(image, size, Image.LANCZOS)
-    framed = Image.new("RGBA", (size[0] + 2 * border, size[1] + 2 * border), (255, 255, 255, 255))
-    framed.paste(photo, (border, border))
-    framed = framed.rotate(angle, resample=Image.BICUBIC, expand=True)
-    position = (int(center[0] - framed.width / 2), int(center[1] - framed.height / 2))
-    _soft_shadow(canvas, framed.getchannel("A"), position, blur=22, opacity=0.6, offset=(0, 16))
-    canvas.paste(framed, position, framed)
+    if min(box_ratio, photo_ratio) / max(box_ratio, photo_ratio) < MIN_PHOTO_SHOWN:
+        photo = Image.blend(photo.filter(ImageFilter.GaussianBlur(28)),
+                            Image.new("RGB", size, BACKGROUND), 0.35)
+        whole = ImageOps.contain(image, size, Image.LANCZOS)
+        photo.paste(whole, ((size[0] - whole.width) // 2, (size[1] - whole.height) // 2))
+    canvas.paste(photo, (left, top))
+
+
+def _paste_framed(canvas, image, box, border=14):
+    """A photo in a white frame with a drop shadow."""
+
+    left, top, right, bottom = box
+    _soft_shadow(canvas, Image.new("L", (right - left, bottom - top), 255), (left, top),
+                 blur=22, opacity=0.6, offset=(0, 16))
+    canvas.paste(TEXT, box)
+    _paste_photo(canvas, image, (left + border, top + border, right - border, bottom - border))
 
 
 def _logo(height):
@@ -554,7 +644,7 @@ def _chip_rows(chips, font, max_width, max_rows=2):
     rows = [[]]
     used = 0
     for chip in chips:
-        width = font.getlength(_shape(chip)) + 56
+        width = font.getlength(_shape(chip)) + 56 + CHECK_SPACE
         if rows[-1] and used + width > max_width:
             if len(rows) == max_rows:
                 break
@@ -565,226 +655,268 @@ def _chip_rows(chips, font, max_width, max_rows=2):
     return [row for row in rows if row]
 
 
-def _draw_chips(canvas, rows, font, right, top, fill, text_fill, outline=None, glass=False):
-    if glass:
-        layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-        glass_draw = ImageDraw.Draw(layer)
+def _info(listing, tag, headline, width):
+    """Fonts, lines and heights of the title band, the tiles and the amenities."""
+
+    text_width = width - 2 * MARGIN - 40
+    tag_font = _fit_font(FONT_MEDIUM, tag, text_width, 44, 30)
+    headline_font = _fit_font(FONT_BLACK, headline, text_width, 96, 76)
+    lines = _wrap(headline, headline_font, text_width, 2)
+    chip_font = _font(FONT_MEDIUM, 38)
+    rows = _chip_rows(story_amenities(listing), chip_font, width - 2 * MARGIN)
+    stats = story_stats(listing)
+
+    band = 2 * BAND_PADDING + TAG_LINE + HEADLINE_LINE * len(lines)
+    height = band
+    if stats:
+        height += BLOCK_GAP + TILE_HEIGHT
+    if rows:
+        height += BLOCK_GAP + CHIP_STEP * len(rows) - (CHIP_STEP - CHIP_HEIGHT)
+    title_width = max(font.getlength(_shape(text)) for font, text in
+                      [(tag_font, tag)] + [(headline_font, line) for line in lines])
+    return {
+        "tag": tag, "tag_font": tag_font, "lines": lines, "headline_font": headline_font,
+        "stats": stats, "chip_font": chip_font, "rows": rows,
+        "band": band, "title_width": title_width,
+        # The block ends just above the call to action; photos fill the rest.
+        "top": CTA_TOP - 40 - height,
+    }
+
+
+def _draw_band(canvas, info, box, radius=0):
+    """The red title band: district, then «۱۵۱ متر، ۳ خواب» in big white type."""
+
+    _rounded(canvas, box, (RED_DEEP, RED), radius)
     draw = ImageDraw.Draw(canvas)
-    for row in rows:
-        x = right
-        for chip, width in row:
-            box = (int(x - width), top, int(x), top + 62)
-            if glass:
-                glass_draw.rounded_rectangle(box, radius=31, fill=(255, 255, 255, 46),
-                                             outline=(255, 255, 255, 120), width=2)
-            else:
-                draw.rounded_rectangle(box, radius=31, fill=fill, outline=outline,
-                                       width=3 if outline else 0)
-            x -= width + 16
-        top += 80
+    right = min(box[2], canvas.width) - (MARGIN if box[2] >= canvas.width else 44)
+    y = box[1] + BAND_PADDING
+    _draw_right(draw, info["tag"], info["tag_font"], right, y, y + TAG_LINE, RED_TINT)
+    y += TAG_LINE
+    for line in info["lines"]:
+        _draw_right(draw, line, info["headline_font"], right, y, y + HEADLINE_LINE, TEXT)
+        y += HEADLINE_LINE
+
+
+def _draw_stats(canvas, stats, top, glass=False):
+    """Tiles with a big value over a small label: «۱۴۰۵ / سال ساخت»."""
+
+    gap = 16
+    tile = (canvas.width - 2 * MARGIN - gap * (len(stats) - 1)) / len(stats)
+    boxes = []
+    for index in range(len(stats)):
+        right = canvas.width - MARGIN - index * (tile + gap)
+        boxes.append((int(right - tile), top, int(right), top + TILE_HEIGHT))
     if glass:
-        canvas.paste(Image.alpha_composite(canvas.convert("RGBA"), layer).convert("RGB"))
-        draw = ImageDraw.Draw(canvas)
-    top -= 80 * len(rows)
+        _glass(canvas, boxes, 28)
+    else:
+        for box in boxes:
+            _rounded(canvas, box, CHIP, 28, shadow=False)
+    draw = ImageDraw.Draw(canvas)
+    for (value, label, _text), (left, top_, right, _bottom) in zip(stats, boxes):
+        middle = (left + right) / 2
+        draw.rounded_rectangle((middle - 26, top_ + 14, middle + 26, top_ + 20), radius=3, fill=RED)
+        _draw_centered(draw, value, _fit_font(FONT_BLACK, value, right - left - 28, 56, 30),
+                       (left, top_ + 26, right, top_ + 94), TEXT)
+        _draw_centered(draw, label, _fit_font(FONT_MEDIUM, label, right - left - 20, 30, 22),
+                       (left, top_ + 96, right, top_ + 136), MUTED)
+
+
+def _check(draw, center, radius, fill, mark):
+    x, y = center
+    draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=fill)
+    unit = radius / 20
+    draw.line([(x - 9 * unit, y + unit), (x - 3 * unit, y + 8 * unit), (x + 10 * unit, y - 7 * unit)],
+              fill=mark, width=max(3, int(5 * unit)), joint="curve")
+
+
+def _draw_amenities(canvas, rows, font, top, style="solid"):
+    """Chips with a red check: «✓ آسانسور», «✓ پارکینگ», «✓ لابی»…"""
+
+    chips = []
     for row in rows:
-        x = right
+        right = canvas.width - MARGIN
         for chip, width in row:
-            _draw_centered(draw, chip, font, (x - width, top, x, top + 62), text_fill)
-            x -= width + 16
-        top += 80
-    return top
+            chips.append((chip, (int(right - width), top, int(right), top + CHIP_HEIGHT)))
+            right -= width + 16
+        top += CHIP_STEP
+    if style == "glass":
+        _glass(canvas, [box for _chip, box in chips], CHIP_HEIGHT // 2)
+    draw = ImageDraw.Draw(canvas)
+    for chip, (left, top_, right, bottom) in chips:
+        if style == "solid":
+            draw.rounded_rectangle((left, top_, right, bottom), radius=CHIP_HEIGHT // 2, fill=CHIP)
+        elif style == "outline":
+            draw.rounded_rectangle((left, top_, right, bottom), radius=CHIP_HEIGHT // 2, outline=TEXT, width=3)
+        _check(draw, (right - 42, (top_ + bottom) / 2), 20, RED, TEXT)
+        _draw_centered(draw, chip, font, (left + 32, top_, right - 76, bottom), TEXT)
 
 
-def _cta(canvas, listing, box, fill, text_fill):
-    text = call_to_action(listing)
-    left, top, right, bottom = box
-    _pill(canvas, box, fill)
-    font = _fit_font(FONT_BLACK, text, right - left - 60, 44, 28)
-    _draw_centered(ImageDraw.Draw(canvas), text, font, box, text_fill)
+def _info_block(canvas, info, band_box, radius=0, style="solid"):
+    _draw_band(canvas, info, band_box, radius)
+    y = band_box[3] + BLOCK_GAP
+    if info["stats"]:
+        _draw_stats(canvas, info["stats"], y, glass=style != "solid")
+        y += TILE_HEIGHT + BLOCK_GAP
+    if info["rows"]:
+        _draw_amenities(canvas, info["rows"], info["chip_font"], y, style)
+
+
+def _cta(canvas, listing, fill=(RED_DEEP, RED), text_fill=TEXT, code_fill=TEXT, code_text=RED_DEEP):
+    """«برای دریافت قیمت و مشخصات» over «عدد [۲۲۹] رو کامنت کنید», the code boxed."""
+
+    left, top, right, bottom = MARGIN, CTA_TOP, canvas.width - MARGIN, CTA_TOP + CTA_HEIGHT
+    _rounded(canvas, (left, top, right, bottom), fill, 48)
+    draw = ImageDraw.Draw(canvas)
+    _draw_centered(draw, "برای دریافت قیمت و مشخصات", _font(FONT_MEDIUM, 40),
+                   (left, top + 16, right, top + 72), text_fill)
+
+    font = _font(FONT_BLACK, 56)
+    code = persian_digits(short_code(listing))
+    before, after = "عدد", "رو کامنت کنید"
+    widths = [font.getlength(_shape(before)), font.getlength(_shape(code)) + 44,
+              font.getlength(_shape(after))]
+    gap = 18
+    x = (left + right + sum(widths) + 2 * gap) / 2
+    line_top, line_bottom = top + 80, top + 154
+    _draw_centered(draw, before, font, (x - widths[0], line_top, x, line_bottom), text_fill)
+    x -= widths[0] + gap
+    draw.rounded_rectangle((x - widths[1], line_top, x, line_bottom), radius=18, fill=code_fill)
+    _draw_centered(draw, code, font, (x - widths[1], line_top, x, line_bottom), code_text)
+    x -= widths[1] + gap
+    _draw_centered(draw, after, font, (x - widths[2], line_top, x, line_bottom), text_fill)
+
+
+def _chevrons(canvas, top):
+    """Arrows pointing at Instagram's comment field under the story."""
+
+    layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    middle = canvas.width // 2
+    for index, alpha in enumerate((235, 150, 80)):
+        y = top + index * 30
+        draw.line([(middle - 34, y), (middle, y + 24), (middle + 34, y)],
+                  fill=(255, 255, 255, alpha), width=9, joint="curve")
+    canvas.paste(Image.alpha_composite(canvas.convert("RGBA"), layer).convert("RGB"))
 
 
 def _code_badge(canvas, center, radius, listing):
-    """A gold disc asking viewers to comment the short code."""
+    """A red disc asking viewers to comment the short code."""
 
     box = (center[0] - radius, center[1] - radius, center[0] + radius, center[1] + radius)
     mask = Image.new("L", (2 * radius, 2 * radius), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, 2 * radius - 1, 2 * radius - 1), fill=255)
     _soft_shadow(canvas, mask, box[:2], blur=20, opacity=0.6, offset=(0, 10))
-    canvas.paste(_gradient(mask.size, GOLD_DEEP, GOLD_LIGHT), box[:2], mask)
+    canvas.paste(_gradient(mask.size, RED_DEEP, RED), box[:2], mask)
     draw = ImageDraw.Draw(canvas)
-    draw.ellipse((box[0] + 10, box[1] + 10, box[2] - 10, box[3] - 10), outline=(255, 255, 255), width=4)
+    draw.ellipse((box[0] + 10, box[1] + 10, box[2] - 10, box[3] - 10), outline=TEXT, width=4)
     _draw_centered(draw, "کامنت کن", _font(FONT_MEDIUM, 30),
-                   (box[0], center[1] - radius * 0.62, box[2], center[1] - radius * 0.12), ACCENT_TEXT)
+                   (box[0], center[1] - radius * 0.62, box[2], center[1] - radius * 0.12), TEXT)
     _draw_centered(draw, persian_digits(short_code(listing)), _font(FONT_BLACK, int(radius * 0.72)),
-                   (box[0], center[1] - radius * 0.1, box[2], center[1] + radius * 0.62), ACCENT_TEXT)
+                   (box[0], center[1] - radius * 0.1, box[2], center[1] + radius * 0.62), TEXT)
 
 
-def _texts(listing, kicker, headline, width, headline_size):
-    margin = 60
-    headline_font = _font(FONT_BLACK, headline_size)
-    chip_font = _font(FONT_MEDIUM, 34)
-    return {
-        "kicker_font": _fit_font(FONT_MEDIUM, kicker, width - 2 * margin - 60, 38, 28),
-        "headline_font": headline_font,
-        "lines": _wrap(headline, headline_font, width - 2 * margin, 2),
-        "chip_font": chip_font,
-        "rows": _chip_rows(story_chips(listing), chip_font, width - 2 * margin),
-    }
+def _layout_classic(canvas, images, listing, tag, headline):
+    """Main photo over a strip of small ones, a full-width red title band."""
 
-
-def _kicker_tag(canvas, kicker, font, right, top, fill=ACCENT, text_fill=ACCENT_TEXT):
-    width = int(font.getlength(_shape(kicker)) + 48)
-    _pill(canvas, (right - width, top, right, top + 58), fill, shadow=False)
-    _draw_centered(ImageDraw.Draw(canvas), kicker, font, (right - width, top, right, top + 58), text_fill)
-
-
-def _layout_diagonal(canvas, draw, images, listing, kicker, headline):
-    """Photo cut on a slant with a gold stripe; tilted photo prints, gold CTA."""
-
-    width, height = canvas.size
-    margin, right = 60, width - 60
-    t = _texts(listing, kicker, headline, width, 82)
+    width = canvas.width
+    info = _info(listing, tag, headline, width)
+    band_top = info["top"]
     extra = images[1:4]
-    block = 76 + 108 * len(t["lines"]) + 80 * len(t["rows"]) + (300 if extra else 0) + 10
-    y = CTA_TOP - 40 - block
-
-    _paste_photo(canvas, images[0], (0, 0, width, y + 160))
-    low, high = y - 30, y - 220
-    draw.polygon([(0, low), (width, high), (width, height), (0, height)], fill=BACKGROUND)
-    draw.polygon([(0, low - 34), (width, high - 34), (width, high - 14), (0, low - 14)], fill=ACCENT)
-    _paste_logo(canvas, 170, left=84, plate=True)
-
-    _kicker_tag(canvas, kicker, t["kicker_font"], right, y)
-    y += 76
-    y = _draw_headline(canvas, draw, t["lines"], t["headline_font"], right, y, 108, TEXT, ACCENT)
-    y = _draw_chips(canvas, t["rows"], t["chip_font"], right, y + 4, CHIP, TEXT)
     if extra:
-        slot = (width - 2 * margin) / len(extra)
-        for index, (image, angle) in enumerate(zip(extra, (-5, 4, -3))):
-            _paste_framed(canvas, image, (int(slot) - 70, 190),
-                          (int(right - slot * (index + 0.5)), y + 150), angle, border=10)
-    _cta(canvas, listing, (margin, CTA_TOP, right, CTA_TOP + CTA_HEIGHT), (GOLD_DEEP, GOLD_LIGHT), ACCENT_TEXT)
-
-
-def _layout_magazine(canvas, draw, images, listing, kicker, headline):
-    """Blurred dark backdrop, a tilted framed photo, glass chips, white CTA."""
-
-    width, height = canvas.size
-    margin, right = 60, width - 60
-    backdrop = ImageOps.fit(images[0], (width, height), Image.LANCZOS).filter(ImageFilter.GaussianBlur(30))
-    canvas.paste(Image.blend(backdrop, Image.new("RGB", (width, height), BACKGROUND), 0.55))
-    draw = ImageDraw.Draw(canvas)
-
-    t = _texts(listing, kicker, headline, width, 80)
-    block = 76 + 106 * len(t["lines"]) + 80 * len(t["rows"])
-    text_top = CTA_TOP - 40 - block
-    _paste_logo(canvas, 130, center=True, top=262)
-
-    frame_top = 420
-    frame_height = max(360, min(660, text_top - 70 - frame_top))
-    _paste_framed(canvas, images[0], (860, frame_height - 28),
-                  (width // 2, frame_top + frame_height // 2), -3, border=14)
-    if len(images) > 1:
-        _paste_framed(canvas, images[1], (250, 180),
-                      (right - 110, frame_top + frame_height - 30), 6, border=8)
-
-    y = text_top
-    _kicker_tag(canvas, kicker, t["kicker_font"], right, y)
-    y += 76
-    y = _draw_headline(canvas, draw, t["lines"], t["headline_font"], right, y, 106, TEXT, GOLD_LIGHT)
-    _draw_chips(canvas, t["rows"], t["chip_font"], right, y + 4, None, TEXT, glass=True)
-    _cta(canvas, listing, (margin, CTA_TOP, right, CTA_TOP + CTA_HEIGHT), TEXT, ACCENT_TEXT)
-
-
-def _layout_mosaic(canvas, draw, images, listing, kicker, headline):
-    """Photo mosaic under a slanted gold band carrying the headline."""
-
-    width, height = canvas.size
-    margin, right = 60, width - 60
-    gap = 12
-    mosaic_bottom = 1130
-    if len(images) >= 3:
-        _paste_photo(canvas, images[0], (0, 0, width, 740))
-        half = (width - gap) // 2
-        _paste_photo(canvas, images[1], (0, 740 + gap, half, mosaic_bottom))
-        _paste_photo(canvas, images[2], (half + gap, 740 + gap, width, mosaic_bottom))
-    elif len(images) == 2:
-        _paste_photo(canvas, images[0], (0, 0, width, 740))
-        _paste_photo(canvas, images[1], (0, 740 + gap, width, mosaic_bottom))
+        strip, gap = 250, 10
+        _paste_photo(canvas, images[0], (0, 0, width, band_top - strip - gap))
+        slot = (width - gap * (len(extra) - 1)) / len(extra)
+        for index, image in enumerate(extra):
+            right = width - index * (slot + gap)
+            _paste_photo(canvas, image, (int(right - slot), band_top - strip, int(right), band_top))
     else:
-        _paste_photo(canvas, images[0], (0, 0, width, mosaic_bottom))
-    draw.rectangle((0, mosaic_bottom, width, height), fill=BACKGROUND)
+        _paste_photo(canvas, images[0], (0, 0, width, band_top))
     _paste_logo(canvas, 165, left=84, plate=True)
-
-    headline_font = _font(FONT_BLACK, 66)
-    lines = _wrap(headline, headline_font, width - 2 * margin, 2)
-    band_top = 960
-    band_height = 96 + 88 * len(lines) + 30
-    band = [(0, band_top + 70), (width, band_top), (width, band_top + band_height),
-            (0, band_top + band_height + 70)]
-    shadow = Image.new("L", (width, height), 0)
-    ImageDraw.Draw(shadow).polygon(band, fill=255)
-    _soft_shadow(canvas, shadow.crop((0, 0, width, height)), (0, 0), blur=18, opacity=0.5, offset=(0, 12))
-    surface = _gradient((width, height), GOLD_DEEP, GOLD_LIGHT)
-    canvas.paste(surface, (0, 0), shadow)
-    draw = ImageDraw.Draw(canvas)
-
-    kicker_font = _fit_font(FONT_MEDIUM, kicker, width - 2 * margin, 36, 28)
-    _draw_rtl(canvas, draw, kicker, kicker_font, right, band_top + 30, ACCENT_TEXT)
-    y = _draw_headline(canvas, draw, lines, headline_font, right, band_top + 84, 88, ACCENT_TEXT, (255, 255, 255))
-
-    chip_font = _font(FONT_MEDIUM, 34)
-    rows = _chip_rows(story_chips(listing), chip_font, width - 2 * margin)
-    chips_top = max(y + 70, band_top + band_height + 100)
-    room = max(1, (CTA_TOP - 30 - chips_top) // 80)
-    _draw_chips(canvas, rows[:room], chip_font, right, chips_top, CHIP, TEXT)
-    _cta(canvas, listing, (margin, CTA_TOP, right, CTA_TOP + CTA_HEIGHT), (GOLD_DEEP, GOLD_LIGHT), ACCENT_TEXT)
+    _info_block(canvas, info, (0, band_top, width, band_top + info["band"]))
+    _cta(canvas, listing)
 
 
-def _layout_cinematic(canvas, draw, images, listing, kicker, headline):
-    """Full-bleed photo, vignette, gold frame, logo and a comment-code disc."""
+def _layout_magazine(canvas, images, listing, tag, headline):
+    """Blurred backdrop, the logo, a framed photo, a red title card, white CTA."""
 
     width, height = canvas.size
-    margin, right = 60, width - 60
-    _paste_photo(canvas, images[0], (0, 0, width, height))
+    backdrop = ImageOps.fit(images[0], (width, height), Image.LANCZOS).filter(ImageFilter.GaussianBlur(30))
+    canvas.paste(Image.blend(backdrop, Image.new("RGB", (width, height), BACKGROUND), 0.6))
+    info = _info(listing, tag, headline, width)
+    _paste_logo(canvas, 120, center=True, top=236)
+    _paste_framed(canvas, images[0], (MARGIN, 390, width - MARGIN, info["top"] - 40))
+    _info_block(canvas, info, (40, info["top"], width - 40, info["top"] + info["band"]),
+                radius=36, style="glass")
+    _cta(canvas, listing, fill=TEXT, text_fill=BACKGROUND, code_fill=RED, code_text=TEXT)
 
-    t = _texts(listing, kicker, headline, width, 86)
-    block = 76 + 112 * len(t["lines"]) + 80 * len(t["rows"]) + 10
-    y = CTA_TOP - 40 - block
 
-    # Darken the edges and the lower half so white text always reads.
-    vignette = Image.new("L", (width, height), 0)
-    ImageDraw.Draw(vignette).ellipse((-260, -120, width + 260, height + 40), fill=255)
-    vignette = ImageOps.invert(vignette.filter(ImageFilter.GaussianBlur(160))).point(lambda v: int(v * 0.8))
-    lower = Image.new("L", (width, height), 0)
-    lower.paste(Image.linear_gradient("L").resize((width, 560)).point(lambda v: int(v * 0.92)), (0, y - 460))
-    lower.paste(Image.new("L", (width, height - (y + 100)), 235), (0, y + 100))
-    shade = Image.new("RGB", (width, height), (6, 10, 18))
-    canvas.paste(shade, (0, 0), vignette)
-    canvas.paste(shade, (0, 0), lower)
-    draw = ImageDraw.Draw(canvas)
-    draw.rounded_rectangle((28, 28, width - 28, height - 28), radius=44, outline=ACCENT, width=4)
+def _layout_mosaic(canvas, images, listing, tag, headline):
+    """A photo grid, then the red title band."""
 
-    _paste_logo(canvas, 180, left=84, top=270, plate=True)
-    _code_badge(canvas, (right - 105, 372), 105, listing)
+    width = canvas.width
+    info = _info(listing, tag, headline, width)
+    bottom, gap = info["top"], 10
+    half = (bottom - gap) // 2
+    tall = min(images, key=lambda image: image.width / image.height)
+    if len(images) >= 3 and tall.width < tall.height:
+        # An upright photo in a tall column beside two stacked ones.
+        rest = [image for image in images if image is not tall]
+        side = width - int(width * 0.58) - gap
+        _paste_photo(canvas, tall, (side + gap, 0, width, bottom))
+        _paste_photo(canvas, rest[0], (0, 0, side, half))
+        _paste_photo(canvas, rest[1], (0, half + gap, side, bottom))
+    elif len(images) >= 3:
+        # Wide photos: one across the top, two side by side under it.
+        split = int(bottom * 0.56)
+        middle = (width - gap) // 2
+        _paste_photo(canvas, images[0], (0, 0, width, split))
+        _paste_photo(canvas, images[1], (middle + gap, split + gap, width, bottom))
+        _paste_photo(canvas, images[2], (0, split + gap, middle, bottom))
+    elif len(images) == 2:
+        _paste_photo(canvas, images[0], (0, 0, width, half))
+        _paste_photo(canvas, images[1], (0, half + gap, width, bottom))
+    else:
+        _paste_photo(canvas, images[0], (0, 0, width, bottom))
+    _paste_logo(canvas, 150, left=84, plate=True)
+    _info_block(canvas, info, (0, bottom, width, bottom + info["band"]))
+    _cta(canvas, listing)
 
-    _kicker_tag(canvas, kicker, t["kicker_font"], right, y)
-    y += 76
-    y = _draw_headline(canvas, draw, t["lines"], t["headline_font"], right, y, 112, TEXT, GOLD_LIGHT, shadow=True)
-    _draw_chips(canvas, t["rows"], t["chip_font"], right, y + 4, None, TEXT, outline=TEXT)
-    _cta(canvas, listing, (margin, CTA_TOP, right, CTA_TOP + CTA_HEIGHT), (GOLD_DEEP, GOLD_LIGHT), ACCENT_TEXT)
+
+def _layout_cinematic(canvas, images, listing, tag, headline):
+    """Full-bleed photo under a dark fade, a red ribbon title, a code disc."""
+
+    width, height = canvas.size
+    # The most upright photo fills the tall story best.
+    canvas.paste(ImageOps.fit(min(images, key=lambda image: image.width / image.height),
+                              (width, height), Image.LANCZOS))
+    info = _info(listing, tag, headline, width)
+    top = info["top"]
+
+    # Darken the top for the logo and everything from the title down for the text.
+    fade = Image.new("L", (width, height), 0)
+    fade.paste(ImageOps.flip(Image.linear_gradient("L").resize((width, 520))).point(lambda v: int(v * 0.55)))
+    fade.paste(Image.linear_gradient("L").resize((width, 420)).point(lambda v: int(v * 0.9)), (0, top - 420))
+    fade.paste(Image.new("L", (width, height - top), 230), (0, top))
+    canvas.paste((6, 10, 18), (0, 0, width, height), fade)
+
+    _paste_logo(canvas, 165, left=84, plate=True)
+    _code_badge(canvas, (width - MARGIN - 100, 352), 100, listing)
+    band_left = max(40, int(width - info["title_width"] - MARGIN - 70))
+    _info_block(canvas, info, (band_left, top, width + 40, top + info["band"]),
+                radius=36, style="outline")
+    _cta(canvas, listing)
 
 
 # (name, renderer, call-to-action colour at its left end)
 STORY_LAYOUTS = (
-    ("diagonal", _layout_diagonal, GOLD_DEEP),
+    ("classic", _layout_classic, RED_DEEP),
     ("magazine", _layout_magazine, TEXT),
-    ("mosaic", _layout_mosaic, GOLD_DEEP),
-    ("cinematic", _layout_cinematic, GOLD_DEEP),
+    ("mosaic", _layout_mosaic, RED_DEEP),
+    ("cinematic", _layout_cinematic, RED_DEEP),
 )
 
 
-def render_story(photos, listing, kicker, headline, layout=0):
+def render_story(photos, listing, tag, headline, layout=0):
     """
     photos: image bytes, the first is the main photo; layout: index into
     STORY_LAYOUTS. Returns JPEG bytes.
@@ -800,9 +932,9 @@ def render_story(photos, listing, kicker, headline, layout=0):
         raise ValueError("no readable photo")
 
     canvas = Image.new("RGB", STORY_SIZE, BACKGROUND)
-    draw = ImageDraw.Draw(canvas)
     _name, render, _cta_fill = STORY_LAYOUTS[layout % len(STORY_LAYOUTS)]
-    render(canvas, draw, images, listing, kicker, headline)
+    render(canvas, images, listing, tag, headline)
+    _chevrons(canvas, CTA_TOP + CTA_HEIGHT + 34)
 
     output = io.BytesIO()
     canvas.save(output, format="JPEG", quality=92, optimize=True)
