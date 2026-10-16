@@ -3,11 +3,12 @@
 Settings › «📸 استوری اینستاگرام» asks how many stories to make and for which
 price range, picks that many random live listings with photos in the range,
 and sends one 1080×1920 story per listing, rotating through four layouts.
-Each story is built from the listing's real photos and own facts; OpenAI only
-writes the kicker, headline and caption (curated templates are used when it
-is not available). The price is left out on purpose: the call to action asks
-viewers to comment the unit code. No source text, agency name, phone number
-or channel handle is ever drawn, and photos are never generated or altered.
+Each story is built from the listing's real photos and own facts, with a
+factual title (no slogan); OpenAI only writes the Instagram caption (a
+factual template is used when it is not available). The price is left out
+on purpose: the call to action asks viewers to comment the short code. No
+source text, agency name, phone number or channel handle is ever drawn, and
+photos are never generated or altered.
 """
 
 import asyncio
@@ -62,7 +63,6 @@ ACCENT_TEXT = (20, 24, 32)
 
 PERSIAN_DIGITS = str.maketrans("0123456789.", "۰۱۲۳۴۵۶۷۸۹٫")
 LATIN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
-_EMOJI = re.compile("[\U0001F000-\U0001FAFF☀-➿️‍#]")
 _PRICE_WORDS = re.compile("میلیارد|میلیون|تومان|ریال")
 
 STYLE_HINTS = (
@@ -71,28 +71,6 @@ STYLE_HINTS = (
     "مینیمال و شیک",
     "احساسی و رویایی",
     "پرانرژی و فوری",
-)
-
-# Fallback copy when OpenAI is not available. {district}, {area} and
-# {bedrooms} are filled from the listing; lines needing a missing fact are
-# skipped.
-KICKERS = (
-    "پیشنهاد ویژه {district}",
-    "فقط برای خوش‌سلیقه‌ها",
-    "تازه به لیست اضافه شد",
-    "یک انتخاب هوشمندانه",
-    "از اون فایل‌هایی که زود میره",
-    "دل‌نشین در {district}",
-)
-HEADLINES = (
-    "خونه‌ای که دنبالش بودی",
-    "اینجا آرامش آدرس داره",
-    "نور، فضا، {district}",
-    "{area} متر حال خوب",
-    "شروع یه زندگی تازه",
-    "یه قدم تا خونه‌ی رویایی",
-    "{bedrooms} خواب، یک دنیا آرامش",
-    "جایی که دلت می‌خواد بمونی",
 )
 
 
@@ -260,6 +238,35 @@ def story_facts(listing):
     return chips
 
 
+# A Persian comma: a middle dot reads as the Persian zero «۰» («۳۰ خواب»).
+TITLE_SEPARATOR = "، "
+
+
+def story_titles(listing):
+    """
+    The story's tag and headline, from the listing's facts only (no slogan):
+    the district as the tag and «۱۵۱ متر، ۳ خواب» as the headline.
+    """
+
+    district = str(listing.get("district") or "").strip()
+    parts = []
+    if listing.get("area_m2"):
+        parts.append(f"{persian_digits(int(Decimal(str(listing['area_m2']))))} متر")
+    if listing.get("bedrooms") is not None:
+        parts.append(f"{persian_digits(listing['bedrooms'])} خواب")
+    if parts:
+        return district or "تبریز", TITLE_SEPARATOR.join(parts)
+    return "تبریز", district or "فایل ویژه"
+
+
+def story_chips(listing):
+    """Facts shown as chips: everything the tag and headline do not already say."""
+
+    tag, headline = story_titles(listing)
+    shown = {tag, headline, *headline.split(TITLE_SEPARATOR)}
+    return [chip for chip in story_facts(listing) if chip not in shown]
+
+
 def short_code(listing):
     """
     The listing's sequence number: the first digits of its unit code (22537
@@ -279,27 +286,6 @@ def call_to_action(listing):
 
 # ---------------------------------------------------------------- copy
 
-def _template_values(listing):
-    values = {}
-    if listing.get("district"):
-        values["district"] = str(listing["district"]).strip()
-    if listing.get("area_m2"):
-        values["area"] = persian_digits(int(Decimal(str(listing["area_m2"]))))
-    if listing.get("bedrooms"):
-        values["bedrooms"] = persian_digits(listing["bedrooms"])
-    return values
-
-
-def _pick(templates, values, rng):
-    usable = []
-    for template in templates:
-        try:
-            usable.append(template.format(**values))
-        except KeyError:
-            continue
-    return rng.choice(usable)
-
-
 def _hashtags(listing):
     tags = ["#املاک_تبریز", "#خرید_آپارتمان", "#تبریز", "#خانه_رویایی"]
     if listing.get("district"):
@@ -307,57 +293,39 @@ def _hashtags(listing):
     return " ".join(tags)
 
 
-def fallback_story_text(listing, rng=random):
-    values = _template_values(listing)
-    kicker = _pick(KICKERS, values, rng)
-    headline = _pick(HEADLINES, values, rng)
-    chips = story_facts(listing)
+def fallback_caption(listing):
+    tag, headline = story_titles(listing)
+    chips = story_chips(listing)
     caption = "\n".join(
         line for line in (
-            f"✨ {kicker}",
-            f"🏡 {headline}",
-            "",
-            "📍 " + " | ".join(chips[:3]) if chips else "",
-            "🔑 " + " • ".join(chips[3:]) if chips[3:] else "",
+            f"🏡 {headline} | {tag}",
+            "🔑 " + " • ".join(chips) if chips else "",
             "",
             f"💬 {call_to_action(listing)}",
             "",
             _hashtags(listing),
         )
     )
-    caption = re.sub(r"\n{3,}", "\n\n", caption).strip()
-    return {"kicker": kicker, "headline": headline, "caption": caption}
+    return re.sub(r"\n{3,}", "\n\n", caption).strip()
 
 
-def _clean_title(value, limit):
-    value = _EMOJI.sub("", str(value or "")).strip()
-    return value if value and len(value) <= limit else ""
+def openai_caption(listing, rng=random):
+    """The Instagram caption from OpenAI, or a factual template."""
 
-
-def openai_story_text(listing, rng=random):
-    """Kicker, headline and caption from OpenAI, or curated templates."""
-
-    fallback = fallback_story_text(listing, rng)
+    fallback = fallback_caption(listing)
     api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
         return fallback
 
     instructions = """
-You are an elite Persian real-estate copywriter and art director writing
-Instagram story copy for a property channel in Tabriz. Write in Persian.
-Use ONLY the facts given; never invent features, addresses, phone numbers,
-agency or person names. Never mention the price or any amount of money: the
-viewer must comment the unit code to get the price.
-Return ONLY one JSON object: {"kicker": "...", "headline": "...", "caption": "..."}
-- kicker: a short premium tagline shown above the headline, at most 24
-  characters, no emoji, no hashtags.
-- headline: a bold, emotional, scroll-stopping headline, at most 28
-  characters, no emoji, no hashtags. Conversational Instagram Persian is fine.
-  Avoid tired clichés such as «فرصت استثنایی» and «بی‌نظیر». Match the
-  requested style.
-- caption: 3 to 5 short engaging Persian lines about the home from the facts
-  (emoji allowed), then the call to action exactly as given, then 5 to 7
-  relevant Persian hashtags on one line.
+You write the Instagram caption for a property story of a real-estate channel
+in Tabriz, in Persian. Use ONLY the facts given; never invent features,
+addresses, phone numbers, agency or person names. Never mention the price or
+any amount of money: the viewer must comment the code to get the price.
+Do not open with a slogan or catchphrase; start directly with the home's
+facts. Write 3 to 5 short Persian lines (emoji allowed), then the call to
+action exactly as given, then 5 to 7 relevant Persian hashtags on one line.
+Return ONLY the caption text.
 """.strip()
     payload = {
         "model": OPENAI_MODEL,
@@ -370,7 +338,7 @@ Return ONLY one JSON object: {"kicker": "...", "headline": "...", "caption": "..
             },
             ensure_ascii=False,
         ),
-        "max_output_tokens": 500,
+        "max_output_tokens": 400,
         "store": False,
     }
     request = urllib.request.Request(
@@ -386,7 +354,7 @@ Return ONLY one JSON object: {"kicker": "...", "headline": "...", "caption": "..
         with urllib.request.urlopen(request, timeout=20) as response:
             data = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
-        logging.warning("OpenAI story text failed: %s", exc)
+        logging.warning("OpenAI story caption failed: %s", exc)
         return fallback
 
     text = ""
@@ -394,26 +362,13 @@ Return ONLY one JSON object: {"kicker": "...", "headline": "...", "caption": "..
         for content in item.get("content") or []:
             if content.get("type") == "output_text" and content.get("text"):
                 text = content["text"]
-    match = re.search(r"\{.*\}", text or "", flags=re.S)
-    try:
-        parsed = json.loads(match.group(0)) if match else {}
-    except ValueError:
-        parsed = {}
-
-    kicker = _clean_title(parsed.get("kicker"), 30) or fallback["kicker"]
-    headline = _clean_title(parsed.get("headline"), 34) or fallback["headline"]
-    if _PRICE_WORDS.search(kicker + headline):
-        kicker, headline = fallback["kicker"], fallback["headline"]
 
     # Keep the price out of the caption whatever the model wrote.
-    lines = [
-        line for line in str(parsed.get("caption") or "").splitlines()
-        if not _PRICE_WORDS.search(line)
-    ]
-    caption = "\n".join(lines).strip() or fallback["caption"]
+    lines = [line for line in str(text).splitlines() if not _PRICE_WORDS.search(line)]
+    caption = "\n".join(lines).strip() or fallback
     if short_code(listing) not in caption.translate(LATIN_DIGITS):
         caption = f"{caption}\n\n💬 {call_to_action(listing)}"
-    return {"kicker": kicker, "headline": headline, "caption": caption}
+    return caption
 
 
 # ---------------------------------------------------------------- image
@@ -673,7 +628,7 @@ def _texts(listing, kicker, headline, width, headline_size):
         "headline_font": headline_font,
         "lines": _wrap(headline, headline_font, width - 2 * margin, 2),
         "chip_font": chip_font,
-        "rows": _chip_rows(story_facts(listing), chip_font, width - 2 * margin),
+        "rows": _chip_rows(story_chips(listing), chip_font, width - 2 * margin),
     }
 
 
@@ -779,7 +734,7 @@ def _layout_mosaic(canvas, draw, images, listing, kicker, headline):
     y = _draw_headline(canvas, draw, lines, headline_font, right, band_top + 84, 88, ACCENT_TEXT, (255, 255, 255))
 
     chip_font = _font(FONT_MEDIUM, 34)
-    rows = _chip_rows(story_facts(listing), chip_font, width - 2 * margin)
+    rows = _chip_rows(story_chips(listing), chip_font, width - 2 * margin)
     chips_top = max(y + 70, band_top + band_height + 100)
     room = max(1, (CTA_TOP - 30 - chips_top) // 80)
     _draw_chips(canvas, rows[:room], chip_font, right, chips_top, CHIP, TEXT)
@@ -946,29 +901,24 @@ async def make_stories(bot, chat_id, count, price_range=None, rng=random):
             photos = await _download_photos(bot, listing["photo_file_ids"])
             if not photos:
                 continue
-            text = await asyncio.to_thread(openai_story_text, listing)
+            caption = await asyncio.to_thread(openai_caption, listing, rng)
+            tag, headline = story_titles(listing)
             try:
                 image = await asyncio.to_thread(
-                    render_story, photos, listing, text["kicker"], text["headline"],
+                    render_story, photos, listing, tag, headline,
                     first_layout + made,
                 )
             except ValueError:
                 continue
 
             made += 1
-            await bot.send_photo(
-                chat_id,
-                photo=io.BytesIO(image),
-                caption=text["caption"][:1024],
-            )
+            # Sent as a file: Telegram shrinks photos to 720×1280, the file
+            # stays exactly 1080×1920 for Instagram.
             await bot.send_document(
                 chat_id,
                 document=io.BytesIO(image),
-                filename=f"story-{listing['unit_code']}.jpg",
-                caption=(
-                    f"📎 فایل باکیفیت استوری {persian_digits(made)} "
-                    f"(کد {persian_digits(listing['unit_code'])})"
-                ),
+                filename=f"story-{short_code(listing)}.jpg",
+                caption=caption[:1024],
             )
             logging.info(
                 "Instagram story created: property_id=%s unit_code=%s layout=%s",
