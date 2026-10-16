@@ -1958,9 +1958,13 @@ def get_unit_code_full_details(unit_code):
                     p.channel_post_url
                 FROM properties p
                 WHERE p.unit_code = %s
+                   OR p.internal_sequence::text = %s
+                -- Stories ask for the short code (the sequence, e.g. 225 of
+                -- 22537); a full unit code still wins when both match.
+                ORDER BY (p.unit_code = %s) DESC
                 LIMIT 1
                 """,
-                (unit_code,),
+                (unit_code, unit_code, unit_code),
             )
 
             property_row = cur.fetchone()
@@ -2423,9 +2427,13 @@ def find_property_by_unit_code(unit_code):
                     channel_post_url
                 FROM properties
                 WHERE unit_code = %s
+                   OR internal_sequence::text = %s
+                -- Stories ask for the short code (the sequence, e.g. 225 of
+                -- 22537); a full unit code still wins when both match.
+                ORDER BY (unit_code = %s) DESC
                 LIMIT 1
                 """,
-                (unit_code,),
+                (unit_code, unit_code, unit_code),
             )
 
             return cur.fetchone()
@@ -15546,7 +15554,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["state"] = "search_unit"
 
         await query.edit_message_text(
-            "🔎 کد داخلی واحد را ارسال کنید.\n\nمثال:\n10380",
+            "🔎 کد داخلی واحد را ارسال کنید.\n\nمثال:\n10380\n\n"
+            "کد سه‌رقمی استوری‌ها هم کار می‌کند (مثلاً ۱۰۳ برای ۱۰۳۸۰).",
             reply_markup=back_menu(),
         )
         return

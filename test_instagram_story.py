@@ -62,7 +62,7 @@ def near(pixel, color, tolerance=16):
 LISTING = dict(
     id=295, unit_code="27310", district="ولیعصر جنوبی", area_m2=81, bedrooms=2,
     floor_text="5 از 4", build_year=1390, has_parking=False, has_elevator=True,
-    has_storage=True,
+    has_storage=True, internal_sequence=273,
 )
 PRICE_WORDS = re.compile("میلیارد|میلیون|تومان")
 
@@ -77,18 +77,23 @@ class StoryTest(unittest.TestCase):
             "ولیعصر جنوبی", "۸۱ متر", "۲ خواب", "طبقه ۵ از ۴", "ساخت ۱۳۹۰", "آسانسور", "انباری",
         ])
         self.assertEqual(self.story.call_to_action(LISTING),
-                         "برای دریافت قیمت و مشخصات، عدد ۲۷۳۱۰ رو کامنت کنید")
+                         "برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو کامنت کنید")
+
+    def test_short_code_is_the_sequence(self):
+        self.assertEqual(self.story.short_code(LISTING), "273")
+        self.assertEqual(self.story.short_code(dict(LISTING, internal_sequence=None, unit_code="22537")), "225")
+        self.assertEqual(self.story.short_code(dict(LISTING, internal_sequence=1004)), "1004")
 
     def test_templates_skip_lines_needing_missing_facts(self):
         bare = dict(LISTING, district=None, area_m2=None, bedrooms=None)
         for seed in range(30):
             text = self.story.fallback_story_text(bare, random.Random(seed))
             self.assertNotIn("{", text["kicker"] + text["headline"])
-            self.assertIn("عدد ۲۷۳۱۰ رو کامنت کنید", text["caption"])
+            self.assertIn("عدد ۲۷۳ رو کامنت کنید", text["caption"])
             self.assertIsNone(PRICE_WORDS.search(text["caption"]))
 
     def test_four_layouts_render_full_hd_stories(self):
-        cta_left = {"classic": 60, "card": 86, "grid": 60, "overlay": 60}
+        cta_left = {"diagonal": 60, "magazine": 60, "mosaic": 60, "cinematic": 60}
         self.assertEqual([name for name, _render, _fill in self.story.STORY_LAYOUTS], list(cta_left))
         for photos in ([photo((70, 110, 150))], [photo((70, 110, 150))] * 4):
             for index, (name, _render, cta_fill) in enumerate(self.story.STORY_LAYOUTS):
@@ -98,6 +103,11 @@ class StoryTest(unittest.TestCase):
                 # The call to action sits above Instagram's reply bar.
                 self.assertTrue(near(image.getpixel((cta_left[name] + 14, 1585)), cta_fill), name)
                 self.assertFalse(near(image.getpixel((cta_left[name] + 14, 1700)), cta_fill), name)
+
+    def test_logo_is_shipped_and_loaded(self):
+        self.assertTrue(self.story.LOGO_PATH.is_file())
+        self.assertEqual(self.story.LOGO_PATH.parent.name, "fonts")  # deployment copies app/fonts
+        self.assertEqual(self.story._logo(170).height, 170)
 
     def test_no_channel_handle_is_drawn(self):
         source = (APP / "instagram_story.py").read_text(encoding="utf-8")
@@ -127,7 +137,7 @@ class StoryTest(unittest.TestCase):
         self.assertEqual(text["kicker"], "لوکس در ولیعصر")
         self.assertEqual(text["headline"], "خونه‌ای که منتظرش بودی")
         self.assertIsNone(PRICE_WORDS.search(text["caption"]))
-        self.assertTrue(text["caption"].endswith("💬 برای دریافت قیمت و مشخصات، عدد ۲۷۳۱۰ رو کامنت کنید"))
+        self.assertTrue(text["caption"].endswith("💬 برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو کامنت کنید"))
         facts = json.loads(sent["input"])
         self.assertEqual(facts["facts"][1], "۸۱ متر")
         self.assertNotIn("price", sent["input"])
@@ -135,7 +145,7 @@ class StoryTest(unittest.TestCase):
     def test_price_in_headline_falls_back_to_templates(self):
         text, _sent = self.openai({"kicker": "فقط ۱۰ میلیارد", "headline": "ارزان", "caption": ""})
         self.assertIsNone(PRICE_WORDS.search(text["kicker"] + text["headline"]))
-        self.assertIn("عدد ۲۷۳۱۰ رو کامنت کنید", text["caption"])
+        self.assertIn("عدد ۲۷۳ رو کامنت کنید", text["caption"])
 
     def test_price_range(self):
         parse = self.story.parse_price_range
@@ -255,6 +265,9 @@ class WiringTest(unittest.TestCase):
         self.assertLess(bot.index("# CRM_ACCESS_GUARD_V1"),
                         bot.index('if action == INSTAGRAM_STORY_ACTION or action.startswith(f"{INSTAGRAM_STORY_ACTION}_"):'))
         self.assertIn("allowed=check_action_access(session, INSTAGRAM_STORY_ACTION)", bot)
+        # The unit search finds a listing by the short code the stories ask for.
+        self.assertEqual(bot.count("OR internal_sequence::text = %s"), 1)
+        self.assertEqual(bot.count("OR p.internal_sequence::text = %s"), 1)
 
 
 if __name__ == "__main__":
