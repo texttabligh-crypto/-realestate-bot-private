@@ -61,6 +61,7 @@ from duplicate_files import (
 from instagram_story import (
     INSTAGRAM_STORY_ACTION,
     INSTAGRAM_STORY_STATES,
+    ensure_story_log_schema,
     handle_instagram_story_button,
     handle_instagram_story_text,
 )
@@ -10186,6 +10187,7 @@ async def post_init(application):
     ensure_campaign_crm_schema()
     ensure_transcript_schema()
     ensure_removed_files_schema()
+    ensure_story_log_schema()
     start_campaign_watch_worker(application)
     start_campaign_broadcast_worker(application)
     start_visit_reminder_worker(application)

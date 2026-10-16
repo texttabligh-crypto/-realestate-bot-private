@@ -10,6 +10,7 @@ comment the short code, and every story is sent as a 1080×1920 file.
 import asyncio
 import io
 import json
+import os
 import random
 import re
 import sys
@@ -20,6 +21,13 @@ from unittest import mock
 
 ROOT = Path(__file__).parent
 APP = ROOT / "app"
+
+try:
+    import psycopg
+except ImportError:  # pragma: no cover - local runs without the driver
+    psycopg = None
+
+DSN = os.getenv("PGTEST_DSN")
 
 try:
     import arabic_reshaper  # noqa: F401
@@ -315,15 +323,27 @@ class StoryTest(unittest.TestCase):
             ("file", "story-274.jpg", (1080, 1920), "🏡 ۸۱ متر، ۲ خواب | منطقه: ولیعصر جنوبی"),
         ])
         self.assertEqual(calls[-1], ("message", "✅ ۲ استوری ساخته شد (۱۰ تا ۱۲ میلیارد)."))
+        # Each sent story is logged, so the listing is skipped for 48 hours.
+        self.assertEqual(self.logged, [(0, 7), (1, 7)])
 
     def test_a_story_that_fails_to_send_is_not_counted(self):
         calls = self.send_stories(fail_first=True)
         self.assertEqual([c[1] for c in calls if c[0] == "file"], ["story-274.jpg", "story-275.jpg"])
         self.assertEqual(calls[-1], ("message", "✅ ۲ استوری ساخته شد (۱۰ تا ۱۲ میلیارد)."))
+        self.assertEqual(self.logged, [(1, 7), (2, 7)])
 
-    def send_stories(self, fail_first):
+    def test_running_out_of_listings_mentions_the_48_hours(self):
+        calls = self.send_stories(fail_first=False, available=1)
+        self.assertEqual(calls[-1][0], "message")
+        self.assertIn("✅ ۱ استوری ساخته شد", calls[-1][1])
+        self.assertIn("۴۸ ساعت گذشته", calls[-1][1])
+        calls = self.send_stories(fail_first=False, available=0)
+        self.assertIn("۴۸ ساعت گذشته استوری نشده باشه", calls[-1][1])
+
+    def send_stories(self, fail_first, available=4):
         data = photo((90, 120, 160))
         calls = []
+        self.logged = []
         self_test = self
 
         class File:
@@ -358,7 +378,7 @@ class StoryTest(unittest.TestCase):
                 calls.append(("file", filename, size, caption.splitlines()[0]))
 
         listings = [dict(LISTING, id=i, unit_code=f"{273 + i}10", internal_sequence=273 + i,
-                         photo_file_ids=["a", "b"]) for i in range(4)]
+                         photo_file_ids=["a", "b"]) for i in range(available)]
         layouts = []
         real_render = self.story.render_story
 
@@ -369,11 +389,12 @@ class StoryTest(unittest.TestCase):
 
         with mock.patch.object(self.story, "random_story_listings", return_value=listings) as pick, \
                 mock.patch.object(self.story, "render_story", render), \
+                mock.patch.object(self.story, "record_story", lambda *row: self.logged.append(row)), \
                 mock.patch.object(self.story, "STORY_SEND_SPACING_SECONDS", 0), \
                 mock.patch.dict("os.environ", {"OPENAI_API_KEY": ""}):
             asyncio.run(self.story.make_stories(Bot(), 7, 2, (10, 12)))
         pick.assert_called_once_with(2, 10, 12)
-        self.assertEqual(len(set(layouts)), 2)  # a failed send leaves its layout to the next
+        self.assertEqual(len(set(layouts)), min(2, available))  # a failed send leaves its layout
         return calls
 
     def test_flow_asks_count_then_price(self):
@@ -408,6 +429,51 @@ class StoryTest(unittest.TestCase):
             self.assertEqual(started[-1], (3, None))
 
 
+@unittest.skipUnless(Image is not None and psycopg and DSN, "set PGTEST_DSN to a scratch PostgreSQL")
+class StoryRepeatDatabaseTest(unittest.TestCase):
+    def setUp(self):
+        self.story = load_story_module()
+        self.connect = lambda: psycopg.connect(DSN)
+        with self.connect() as conn:
+            conn.execute("""
+                DROP TABLE IF EXISTS instagram_story_log, property_attributes, property_media,
+                    property_trash, properties CASCADE;
+                CREATE TABLE properties (
+                    id BIGINT PRIMARY KEY, unit_code TEXT, district TEXT, area_m2 NUMERIC,
+                    bedrooms INT, floor_text TEXT, build_year INT, has_parking BOOL,
+                    has_elevator BOOL, has_storage BOOL, internal_sequence INT, direction TEXT,
+                    address_text TEXT, raw_text TEXT, status TEXT, published_message_id BIGINT,
+                    deleted_from_channel_at TIMESTAMPTZ, current_price_billion NUMERIC);
+                CREATE TABLE property_media (
+                    id BIGSERIAL PRIMARY KEY, property_id BIGINT, telegram_file_id TEXT,
+                    media_type TEXT DEFAULT 'PHOTO', position INT DEFAULT 0);
+                CREATE TABLE property_trash (property_id BIGINT PRIMARY KEY);
+                CREATE TABLE property_attributes (
+                    id BIGSERIAL PRIMARY KEY, property_id BIGINT, attribute_key TEXT,
+                    attribute_label TEXT, attribute_value TEXT, display_order INT,
+                    is_visible BOOL DEFAULT TRUE);
+                INSERT INTO properties (id, unit_code, internal_sequence, status,
+                                        published_message_id, current_price_billion)
+                SELECT g, g::text || '11', g, 'ACTIVE', g, 11 FROM generate_series(1, 3) g;
+                INSERT INTO property_media (property_id, telegram_file_id)
+                SELECT g, 'photo' || g FROM generate_series(1, 3) g;
+            """)
+
+    def test_a_listing_gets_one_story_per_48_hours(self):
+        with mock.patch.object(self.story, "db_connect", self.connect):
+            self.story.ensure_story_log_schema()
+            self.story.ensure_story_log_schema()  # idempotent at every start
+            pick = lambda: sorted(item["id"] for item in self.story.random_story_listings(5, 10, 12))
+            self.assertEqual(pick(), [1, 2, 3])
+            self.story.record_story(1, 7)
+            self.assertEqual(pick(), [2, 3])
+            with self.connect() as conn:
+                conn.execute("INSERT INTO instagram_story_log (property_id, chat_id, created_at) "
+                             "VALUES (2, 8, NOW() - INTERVAL '49 hours'), (3, 8, NOW() - INTERVAL '47 hours')")
+            # Another admin's story counts too; one older than 48 hours does not.
+            self.assertEqual(pick(), [2])
+
+
 class WiringTest(unittest.TestCase):
     def test_access_button_and_count_routing(self):
         source = (APP / "crm_panel.py").read_text(encoding="utf-8")
@@ -420,6 +486,7 @@ class WiringTest(unittest.TestCase):
         self.assertLess(bot.index("# CRM_ACCESS_GUARD_V1"),
                         bot.index('if action == INSTAGRAM_STORY_ACTION or action.startswith(f"{INSTAGRAM_STORY_ACTION}_"):'))
         self.assertIn("allowed=check_action_access(session, INSTAGRAM_STORY_ACTION)", bot)
+        self.assertIn("    ensure_story_log_schema()\n", bot)
         # The unit search finds a listing by the short code the stories ask for.
         self.assertEqual(bot.count("OR internal_sequence::text = %s"), 1)
         self.assertEqual(bot.count("OR p.internal_sequence::text = %s"), 1)
