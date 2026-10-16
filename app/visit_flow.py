@@ -799,6 +799,23 @@ async def handle_visit_start(
     ):
         return True
 
+    return await start_visit_request(
+        update,
+        context,
+        property_id,
+    )
+
+
+async def start_visit_request(
+    update,
+    context,
+    property_id,
+):
+    """File a visit request for property_id, asking for the phone when it is missing.
+
+    The channel post's visit link and the bot's own visit offer («آره،
+    بازدید می‌خوام») both land here.
+    """
     visitable = get_visitable_property(
         property_id
     )
