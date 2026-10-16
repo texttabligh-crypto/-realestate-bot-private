@@ -46,6 +46,9 @@ STORY_PHOTO_LIMIT = 4
 STORY_MAX_COUNT = 10
 STORY_COUNT_CHOICES = (1, 3, 5, 10)
 STORY_SEND_SPACING_SECONDS = 1.5
+# A listing gets at most one story in this window, whoever asks for it:
+# every story goes to the same Instagram page.
+STORY_REPEAT_HOURS = 48
 # Every layout keeps its call to action here, clear of Instagram's reply bar.
 # The call to action ends 260px above the bottom, clear of Instagram's
 # comment field.
@@ -90,10 +93,44 @@ _LISTING_KEYS = (
 )
 
 
+def ensure_story_log_schema():
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS instagram_story_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    property_id BIGINT NOT NULL
+                        REFERENCES properties(id) ON DELETE CASCADE,
+                    chat_id BIGINT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS instagram_story_log_property_recent
+                ON instagram_story_log (property_id, created_at)
+                """
+            )
+        conn.commit()
+
+
+def record_story(property_id, chat_id):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO instagram_story_log (property_id, chat_id) VALUES (%s, %s)",
+                (property_id, chat_id),
+            )
+        conn.commit()
+
+
 def random_story_listings(count, price_min=None, price_max=None):
     """
     Up to count*2 random live published listings with photos, as dicts,
-    priced within [price_min, price_max] billion when given.
+    priced within [price_min, price_max] billion when given, leaving out
+    those with a story in the last STORY_REPEAT_HOURS.
     """
 
     price_sql = ""
@@ -132,10 +169,16 @@ def random_story_listings(count, price_min=None, price_max=None):
                       FROM property_trash pt
                       WHERE pt.property_id = p.id
                   )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM instagram_story_log sl
+                      WHERE sl.property_id = p.id
+                        AND sl.created_at > NOW() - make_interval(hours => %s)
+                  )
                 ORDER BY random()
                 LIMIT %s
                 """,
-                (*params, int(count) * 2),
+                (*params, STORY_REPEAT_HOURS, int(count) * 2),
             )
             listings = [dict(zip(_LISTING_KEYS, row)) for row in cur.fetchall()]
             if not listings:
@@ -1157,6 +1200,12 @@ async def make_stories(bot, chat_id, count, price_range=None, rng=random):
                 )
                 continue
             made += 1
+            try:
+                await asyncio.to_thread(record_story, listing["id"], chat_id)
+            except Exception:
+                logging.exception(
+                    "Instagram story could not be logged: property_id=%s", listing["id"]
+                )
             logging.info(
                 "Instagram story created: property_id=%s unit_code=%s layout=%s",
                 listing["id"],
@@ -1183,10 +1232,15 @@ async def make_stories(bot, chat_id, count, price_range=None, rng=random):
     elif made:
         summary = (
             f"✅ {persian_digits(made)} استوری ساخته شد؛ "
-            f"در بازهٔ «{label}» فایل فعال عکس‌دار بیشتری پیدا نشد."
+            f"در بازهٔ «{label}» فایل فعال عکس‌دار دیگه‌ای پیدا نشد.\n"
+            f"(فایل‌هایی که توی {persian_digits(STORY_REPEAT_HOURS)} ساعت گذشته "
+            "استوری شدن تکرار نمی‌شن.)"
         )
     else:
-        summary = f"⚠️ در بازهٔ «{label}» فایل فعال عکس‌داری برای ساخت استوری پیدا نشد."
+        summary = (
+            f"⚠️ در بازهٔ «{label}» فایل فعال عکس‌داری پیدا نشد که توی "
+            f"{persian_digits(STORY_REPEAT_HOURS)} ساعت گذشته استوری نشده باشه."
+        )
     await bot.send_message(chat_id, summary, reply_markup=story_done_keyboard())
 
 
