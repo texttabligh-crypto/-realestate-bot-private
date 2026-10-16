@@ -24,6 +24,19 @@ from telegram import (
 from crm_panel import parse_visit_datetime, TEHRAN
 from publisher import publish_property
 from visit_ops_group import get_visit_ops_target, telegram_thread_kwargs
+from listing_offer import (
+    LISTING_OFFER_STATE,
+    SIMILAR_CALLBACK_PREFIX,
+    VISIT_CALLBACK_PREFIX,
+    callback_property_id,
+    channel_username,
+    find_listing_by_code,
+    find_listing_by_id,
+    offer_reply,
+    parse_listing_code,
+    persian_digits,
+    send_listing_offer,
+)
 from shahfile_ai import (
     ensure_ai_schema,
     extract_ai_intent,
@@ -378,7 +391,9 @@ def parse_visit_unit_intent(text: str):
     raw = normalize_digits(text).lower()
     if "بازدید" not in raw:
         return None
-    match = re.search(r"(?:کد|واحد)\s*[:#\-]?\s*(\d{2,12})", raw)
+    match = re.search(r"(?:کد|واحد)\s*[:#\-]?\s*(\d{2,12})", raw) or re.search(
+        r"بازدید\s*(?:از\s*)?(?:فایل\s*)?[:#\-]?\s*(\d{3,7})(?![\d/:])", raw
+    )
     if not match:
         return None
     return match.group(1)
@@ -780,16 +795,17 @@ def find_visitable_by_unit(unit_code: str):
                 SELECT id,unit_code,address_text,district,area_m2,bedrooms,
                        build_year,current_price_billion,channel_post_url
                 FROM properties
-                WHERE unit_code=%s
+                WHERE (unit_code=%s OR internal_sequence::text=%s)
                   AND status='ACTIVE'
                   AND published_message_id IS NOT NULL
                   AND deleted_from_channel_at IS NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM property_trash pt WHERE pt.property_id=properties.id
                   )
+                ORDER BY (unit_code=%s) DESC
                 LIMIT 1
                 """,
-                (unit_code,),
+                (unit_code, unit_code, unit_code),
             )
             return cur.fetchone()
 
@@ -1886,6 +1902,25 @@ async def handle_customer_text(update, context):
     # It intentionally does not destroy an in-progress visit/seller conversation.
     normalized_text = normalize_digits(text).strip()
 
+    # The answer to «می‌خواید براتون یه بازدید هماهنگ کنم؟». Anything else is
+    # a new message.
+    if state == LISTING_OFFER_STATE:
+        offered = (payload or {}).get("property_id")
+        clear_conversation(user.id, customer_id=customer_id)
+        state, payload = "IDLE", {}
+        answer = offer_reply(text) if offered else None
+        if answer == "yes":
+            from visit_flow import start_visit_request
+            await start_visit_request(update, context, int(offered))
+            return True
+        if answer == "no":
+            await update.message.reply_text(
+                "باشه، هر طور راحتید 🌷\n"
+                "اگه دنبال فایل دیگه‌ای هستید، بودجه و منطقهٔ مدنظرتون رو بگید "
+                "تا بهترین گزینه‌ها رو براتون بفرستم."
+            )
+            return True
+
     # A number typed after a «درخواست بازدید» link completes that request,
     # like the share-contact button does.
     if state == "IDLE":
@@ -1953,6 +1988,30 @@ async def handle_customer_text(update, context):
             else "در حال حاضر پیشنهاد خودکاری برای شما فعال نیست."
         )
         return True
+
+    # «کد ۳۵۱۳», «۳۵۱۳» or a story's short code «۳۵۱»: the listing itself
+    # and an offer to arrange a visit.
+    listing_code = parse_listing_code(text) if state == "IDLE" else None
+    if listing_code:
+        code, labelled = listing_code
+        listing = await asyncio.to_thread(find_listing_by_code, code)
+        if listing:
+            username = await asyncio.to_thread(channel_username)
+            await send_listing_offer(update.message, listing, username)
+            set_conversation(
+                user.id,
+                LISTING_OFFER_STATE,
+                {"property_id": listing["id"], "unit_code": listing["unit_code"]},
+                customer_id=customer_id,
+            )
+            return True
+        if labelled:
+            await update.message.reply_text(
+                f"فایلی با کد {persian_digits(code)} الان فعال نیست 🙏\n"
+                "ممکنه فروش رفته باشه. بودجه و منطقهٔ مدنظرتون رو بگید تا "
+                "فایل‌های مشابه رو براتون بفرستم."
+            )
+            return True
 
     # A bare «11» is a budget: offer homes around 11 billion for the customer
     # to confirm, instead of sending it to an advisor as a question.
@@ -2479,6 +2538,33 @@ async def handle_customer_callback(update, context, session=None):
     state, payload, stored_customer_id = get_conversation(user.id)
     customer_id = stored_customer_id or customer_id
 
+    if action.startswith(VISIT_CALLBACK_PREFIX):
+        property_id = callback_property_id(action, VISIT_CALLBACK_PREFIX)
+        if state == LISTING_OFFER_STATE:
+            clear_conversation(user.id, customer_id=customer_id)
+        await query.answer()
+        if property_id:
+            from visit_flow import start_visit_request
+            await start_visit_request(update, context, property_id)
+        return True
+
+    if action.startswith(SIMILAR_CALLBACK_PREFIX):
+        property_id = callback_property_id(action, SIMILAR_CALLBACK_PREFIX)
+        listing = await asyncio.to_thread(find_listing_by_id, property_id) if property_id else None
+        await query.answer()
+        if not listing or not listing.get("current_price_billion"):
+            await query.message.reply_text("بودجه و منطقهٔ مدنظرتون رو بگید تا فایل‌های مناسب رو براتون بفرستم 🌷")
+            return True
+        low, high = price_band(float(listing["current_price_billion"]))
+        result_text, keyboard, _total, _sub_id = subscribe_and_render(
+            user.id,
+            customer_id,
+            {"price_min_billion": low, "price_max_billion": high},
+            f"فایل‌های مشابه کد {listing['unit_code']}",
+        )
+        await query.message.reply_text(result_text, reply_markup=keyboard, disable_web_page_preview=True)
+        return True
+
     if action == "sc_home":
         _abandon_local_flow(user.id, state, payload, customer_id)
         await query.edit_message_text(
@@ -2496,6 +2582,7 @@ async def handle_customer_callback(update, context, session=None):
             "• ۶ تا ۸ میلیارد چی دارین؟\n"
             "• ۸۰ تا ۱۱۰ متر در ولیعصر\n"
             "• سه خواب با پارکینگ زیر ۱۵ میلیارد\n"
+            "• کد ۲۷۲۹ (مشخصات و قیمتش رو می‌فرستم)\n"
             "• برای کد ۲۷۲۹ وقت بازدید می‌خوام\n\n"
             "درخواستت رو همینجا بفرست 👇",
             reply_markup=InlineKeyboardMarkup([[
