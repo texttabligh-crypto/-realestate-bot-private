@@ -1,8 +1,9 @@
 """Settings › «📸 استوری اینستاگرام» makes stories for random live listings.
 
-The owner picks how many; each story uses the listing's real photos and own
-facts, OpenAI only writes the kicker/headline/caption, the price is left out
-and the call to action asks viewers to comment the unit code.
+The owner picks how many and a price range; each story uses the listing's
+real photos and own facts in one of four layouts, OpenAI only writes the
+kicker/headline/caption, the price and the channel handle are left out, and
+the call to action asks viewers to comment the unit code.
 """
 import asyncio
 import io
@@ -40,8 +41,7 @@ def load_story_module():
     sys.path.insert(0, str(APP))
     stubs = {
         "telegram": types.SimpleNamespace(InlineKeyboardButton=Button, InlineKeyboardMarkup=Markup),
-        "publisher": types.SimpleNamespace(
-            db_connect=None, get_destination_channel=lambda: (-1, "کانال", "nimatmelk")),
+        "publisher": types.SimpleNamespace(db_connect=None),
     }
     with mock.patch.dict(sys.modules, stubs):
         sys.modules.pop("instagram_story", None)
@@ -87,18 +87,26 @@ class StoryTest(unittest.TestCase):
             self.assertIn("عدد ۲۷۳۱۰ رو کامنت کنید", text["caption"])
             self.assertIsNone(PRICE_WORDS.search(text["caption"]))
 
-    def test_renders_a_full_hd_story_without_price(self):
+    def test_four_layouts_render_full_hd_stories(self):
+        cta_left = {"classic": 60, "card": 86, "grid": 60, "overlay": 60}
+        self.assertEqual([name for name, _render, _fill in self.story.STORY_LAYOUTS], list(cta_left))
         for photos in ([photo((70, 110, 150))], [photo((70, 110, 150))] * 4):
-            image = Image.open(io.BytesIO(self.story.render_story(
-                photos, LISTING, "پیشنهاد ویژه ولیعصر جنوبی", "نور، فضا، ولیعصر جنوبی", "nimatmelk")))
-            self.assertEqual(image.size, (1080, 1920))
-            # The call to action sits above Instagram's reply bar.
-            self.assertTrue(near(image.getpixel((90, 1585)), (226, 182, 82)))
-            self.assertFalse(near(image.getpixel((90, 1700)), (226, 182, 82)))
+            for index, (name, _render, cta_fill) in enumerate(self.story.STORY_LAYOUTS):
+                image = Image.open(io.BytesIO(self.story.render_story(
+                    photos, LISTING, "پیشنهاد ویژه ولیعصر جنوبی", "نور، فضا، ولیعصر جنوبی", index)))
+                self.assertEqual(image.size, (1080, 1920), name)
+                # The call to action sits above Instagram's reply bar.
+                self.assertTrue(near(image.getpixel((cta_left[name] + 14, 1585)), cta_fill), name)
+                self.assertFalse(near(image.getpixel((cta_left[name] + 14, 1700)), cta_fill), name)
+
+    def test_no_channel_handle_is_drawn(self):
+        source = (APP / "instagram_story.py").read_text(encoding="utf-8")
+        self.assertNotIn("brand", source)
+        self.assertNotIn("get_destination_channel", source)
 
     def test_unreadable_photos_are_reported(self):
         with self.assertRaises(ValueError):
-            self.story.render_story([b"not an image"], LISTING, "x", "y", "")
+            self.story.render_story([b"not an image"], LISTING, "x", "y")
 
     def openai(self, answer):
         body = json.dumps({"output": [{"type": "message", "content": [
@@ -128,6 +136,22 @@ class StoryTest(unittest.TestCase):
         text, _sent = self.openai({"kicker": "فقط ۱۰ میلیارد", "headline": "ارزان", "caption": ""})
         self.assertIsNone(PRICE_WORDS.search(text["kicker"] + text["headline"]))
         self.assertIn("عدد ۲۷۳۱۰ رو کامنت کنید", text["caption"])
+
+    def test_price_range(self):
+        parse = self.story.parse_price_range
+        self.assertEqual(parse("۱۰ تا ۱۲ میلیارد"), (10, 12))
+        self.assertEqual(parse("12-10"), (10, 12))
+        self.assertEqual(parse("زیر ۸"), (None, 8))
+        self.assertEqual(parse("بالای ۲۰ میلیارد"), (20, None))
+        self.assertEqual(parse("۱۰٫۵"), (parse("10.5")[0], parse("10.5")[1]))
+        low, high = parse("10")
+        self.assertTrue(low < 10 < high)
+        self.assertIsNone(parse("سلام"))
+        label = self.story.price_range_label
+        self.assertEqual(label(parse("۱۰ تا ۱۲")), "۱۰ تا ۱۲ میلیارد")
+        self.assertEqual(label(None), "همه قیمت‌ها")
+        self.assertEqual(label((None, 8)), "تا ۸ میلیارد")
+        self.assertEqual(label((20, None)), "از ۲۰ میلیارد به بالا")
 
     def test_story_count(self):
         self.assertEqual(self.story.parse_story_count("۵"), 5)
@@ -165,17 +189,58 @@ class StoryTest(unittest.TestCase):
                 calls.append(("file", filename))
 
         listings = [dict(LISTING, id=i, unit_code=str(27310 + i), photo_file_ids=["a", "b"]) for i in range(4)]
-        with mock.patch.object(self.story, "random_story_listings", return_value=listings), \
+        layouts = []
+        real_render = self.story.render_story
+
+        def render(photos, listing, kicker, headline, layout=0):
+            layouts.append(layout % 4)
+            return real_render(photos, listing, kicker, headline, layout)
+
+        with mock.patch.object(self.story, "random_story_listings", return_value=listings) as pick, \
+                mock.patch.object(self.story, "render_story", render), \
                 mock.patch.object(self.story, "STORY_SEND_SPACING_SECONDS", 0), \
                 mock.patch.dict("os.environ", {"OPENAI_API_KEY": ""}):
-            asyncio.run(self.story.make_stories(Bot(), 7, 2))
+            asyncio.run(self.story.make_stories(Bot(), 7, 2, (10, 12)))
+        pick.assert_called_once_with(2, 10, 12)
+        self.assertEqual(len(set(layouts)), 2)
         self.assertEqual([c for c in calls if c[0] in ("photo", "file")], [
             ("photo", "#ولیعصر_جنوبی #املاک_تبریز #خرید_آپارتمان #تبریز #خانه_رویایی"),
             ("file", "story-27310.jpg"),
             ("photo", "#ولیعصر_جنوبی #املاک_تبریز #خرید_آپارتمان #تبریز #خانه_رویایی"),
             ("file", "story-27311.jpg"),
         ])
-        self.assertEqual(calls[-1], ("message", "✅ ۲ استوری ساخته شد."))
+        self.assertEqual(calls[-1], ("message", "✅ ۲ استوری ساخته شد (۱۰ تا ۱۲ میلیارد)."))
+
+    def test_flow_asks_count_then_price(self):
+        started = []
+        context = types.SimpleNamespace(user_data={})
+        edits = []
+
+        class Query:
+            data = "insta_story_n_5"
+            message = types.SimpleNamespace(chat_id=7)
+
+            async def edit_message_text(self, text, reply_markup=None):
+                edits.append(text)
+
+        with mock.patch.object(self.story, "_start_batch",
+                               lambda ctx, chat, count, price: started.append((count, price)) or True):
+            asyncio.run(self.story.handle_instagram_story_button(Query(), context))
+            self.assertEqual(context.user_data, {"insta_story_count": 5, "state": "insta_story_price"})
+            self.assertIn("بازهٔ قیمت", edits[-1])
+
+            update = types.SimpleNamespace(
+                message=types.SimpleNamespace(text="۱۰ تا ۱۲ میلیارد"),
+                effective_chat=types.SimpleNamespace(id=7),
+            )
+            asyncio.run(self.story.handle_instagram_story_text(update, context, allowed=True))
+            self.assertEqual(started, [(5, (10, 12))])
+            self.assertEqual(context.user_data, {})
+
+            context.user_data.update({"insta_story_count": 3, "state": "insta_story_price"})
+            Query.data = "insta_story_all"
+            asyncio.run(self.story.handle_instagram_story_button(Query(), context))
+            self.assertEqual(started[-1], (3, None))
 
 
 class WiringTest(unittest.TestCase):

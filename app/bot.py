@@ -60,9 +60,9 @@ from duplicate_files import (
 )
 from instagram_story import (
     INSTAGRAM_STORY_ACTION,
-    INSTAGRAM_STORY_COUNT_STATE,
+    INSTAGRAM_STORY_STATES,
     handle_instagram_story_button,
-    handle_instagram_story_count_text,
+    handle_instagram_story_text,
 )
 from channel_file_editor import (
     ensure_channel_file_editor_schema,
@@ -10312,8 +10312,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = context.user_data.get("state")
 
-    if state == INSTAGRAM_STORY_COUNT_STATE:
-        await handle_instagram_story_count_text(
+    if state in INSTAGRAM_STORY_STATES:
+        await handle_instagram_story_text(
             update,
             context,
             allowed=check_action_access(session, INSTAGRAM_STORY_ACTION),
