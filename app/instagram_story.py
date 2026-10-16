@@ -85,7 +85,7 @@ STYLE_HINTS = (
 _LISTING_KEYS = (
     "id", "unit_code", "district", "area_m2", "bedrooms", "floor_text",
     "build_year", "has_parking", "has_elevator", "has_storage",
-    "internal_sequence", "direction",
+    "internal_sequence", "direction", "address_text",
 )
 
 
@@ -111,7 +111,7 @@ def random_story_listings(count, price_min=None, price_max=None):
                 SELECT
                     p.id, p.unit_code, p.district, p.area_m2, p.bedrooms,
                     p.floor_text, p.build_year, p.has_parking, p.has_elevator,
-                    p.has_storage, p.internal_sequence, p.direction
+                    p.has_storage, p.internal_sequence, p.direction, p.address_text
                 FROM properties p
                 WHERE p.status = 'ACTIVE'
                   AND p.published_message_id IS NOT NULL
@@ -342,8 +342,9 @@ def story_facts(listing):
     """All the listing's own facts, for the caption; never the price."""
 
     facts = []
-    if listing.get("district"):
-        facts.append(str(listing["district"]).strip())
+    location = story_location(listing)
+    if location:
+        facts.append(location)
     if listing.get("area_m2"):
         facts.append(f"{persian_digits(int(Decimal(str(listing['area_m2']))))} متر")
     if listing.get("bedrooms") is not None:
@@ -357,13 +358,22 @@ def story_facts(listing):
 TITLE_SEPARATOR = "، "
 
 
+def story_location(listing):
+    """The location the channel post shows: the address, else the district."""
+
+    address = _drawable(str(listing.get("address_text") or "").replace("#", " "))
+    if 0 < len(address) <= 32:
+        return address
+    return _drawable(str(listing.get("district") or "").replace("#", " "))
+
+
 def story_titles(listing):
     """
     The story's tag and headline, from the listing's facts only (no slogan):
-    the district as the tag and «۱۵۱ متر، ۳ خواب» as the headline.
+    the location as the tag and «۱۵۱ متر، ۳ خواب» as the headline.
     """
 
-    district = _drawable(listing.get("district"))
+    district = story_location(listing)
     parts = []
     if listing.get("area_m2"):
         parts.append(f"{persian_digits(int(Decimal(str(listing['area_m2']))))} متر")
@@ -395,8 +405,9 @@ def call_to_action(listing):
 
 def _hashtags(listing):
     tags = ["#املاک_تبریز", "#خرید_آپارتمان", "#تبریز", "#خانه_رویایی"]
-    if listing.get("district"):
-        tags.insert(0, "#" + re.sub(r"\s+", "_", str(listing["district"]).strip()))
+    district = _drawable(str(listing.get("district") or "").replace("#", " "))
+    if district:
+        tags.insert(0, "#" + re.sub(r"\s+", "_", district))
     return " ".join(tags)
 
 

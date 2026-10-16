@@ -929,6 +929,13 @@ def parse_address_text(text: str):
 
 
 
+def is_feature_line_district(value):
+    """A district starting with a bullet or emoji («▫️سازنده مطمئن») is a feature line."""
+
+    value = str(value or "").strip()
+    return bool(value) and not value[0].isalnum()
+
+
 def parse_district(text: str):
     pinned_location = _extract_pinned_location(text)
 
@@ -987,13 +994,20 @@ def parse_district(text: str):
     if contextual_district:
         return contextual_district
 
-    fallback = re.search(
+    for fallback in re.finditer(
         r"(?:فروش\s+)?(?:آپارتمان|واحد|ملک)\s+([^\n\r|،]{2,40})",
         text,
-    )
-
-    if fallback:
+    ):
         value = fallback.group(1).strip()
+        line_start = text.rfind("\n", 0, fallback.start()) + 1
+
+        # «✨ ویژگی‌های ملک» heads a feature list: the bullet under it
+        # («▫️سازنده مطمئن») is not a district.
+        if is_feature_line_district(value) or re.search(
+            r"ویژگی|مشخصات|امکانات",
+            text[line_start:fallback.start()],
+        ):
+            continue
 
         # "واحد 131 متری 2 خواب..." describes the unit,
         # not the property's district.
@@ -1011,6 +1025,7 @@ def parse_district(text: str):
 
         if value:
             return value[:255]
+        break
 
     address = parse_address_text(text)
 

@@ -212,6 +212,17 @@ class StoryTest(unittest.TestCase):
         self.assertGreaterEqual(right - left, 0.62 * 960 - 1)
         self.assertLess(right - left, 960)
 
+    def test_story_shows_the_channel_post_location(self):
+        story = self.story
+        listing = dict(LISTING, address_text="ولیعصر پروین اعتصامی", district="▫️سازنده مطمئن")
+        self.assertEqual(story.story_titles(listing)[0], "ولیعصر پروین اعتصامی")
+        self.assertEqual(story.story_facts(listing)[0], "ولیعصر پروین اعتصامی")
+        too_long = dict(LISTING, address_text="ولیعصر، خیابان پروین اعتصامی، کوچه گلستان، پلاک ۱۲")
+        self.assertEqual(story.story_location(too_long), "ولیعصر جنوبی")
+        self.assertEqual(story.story_location(dict(LISTING, address_text="#ولیعصر")), "ولیعصر")
+        caption = story.fallback_caption(dict(LISTING, district="#ولیعصر"))
+        self.assertIn("\n#ولیعصر #املاک_تبریز", caption)
+
     def test_emoji_the_font_cannot_draw_are_dropped(self):
         listing = dict(LISTING, district="\u203c\ufe0f\u203c\ufe0fسازنده مطمئن 🔸")
         self.assertEqual(self.story.story_titles(listing)[0], "سازنده مطمئن")

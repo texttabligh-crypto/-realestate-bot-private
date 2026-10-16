@@ -18,7 +18,7 @@ from telegram.error import BadRequest, RetryAfter, TimedOut
 
 from composite_search import composite_text_predicates
 from property_filter import classify_property
-from property_parser import is_direction_only_detail, is_headline_detail, is_promotional_attribute, normalize_text, parse_property, parse_dynamic_attributes, parse_rule_attributes, parse_source_unit_code, split_listing_blocks
+from property_parser import is_direction_only_detail, is_feature_line_district, is_headline_detail, is_promotional_attribute, normalize_text, parse_property, parse_dynamic_attributes, parse_rule_attributes, parse_source_unit_code, split_listing_blocks
 from publisher import get_property_for_publish, build_publish_text, publish_property, get_property_media, republish_property, get_destination_channel, build_channel_post_url
 
 from scheduler import (
@@ -9139,6 +9139,54 @@ async def repair_extended_source_locations(application):
     )
 
 
+def repair_feature_line_districts():
+    """
+    Re-read the district of live listings whose stored district is a
+    feature bullet: the old fallback took the line under «✨ ویژگی‌های ملک»
+    («▫️سازنده مطمئن») for the district, which also kept those listings out
+    of their region's category post. Returns (property_id, unit_code,
+    district, has_address) per repaired listing.
+    """
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, unit_code, district, raw_text, address_text
+                FROM properties
+                WHERE status = 'ACTIVE'
+                  AND deleted_from_channel_at IS NULL
+                  AND district IS NOT NULL
+                  AND raw_text IS NOT NULL
+                ORDER BY id
+                """
+            )
+            rows = cur.fetchall()
+
+    repaired = []
+    for property_id, unit_code, district, raw_text, address_text in rows:
+        if not is_feature_line_district(district):
+            continue
+        new_district = parse_property(raw_text).get("district")
+        if is_feature_line_district(new_district):
+            new_district = None
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE properties
+                    SET district = %s, updated_at = NOW()
+                    WHERE id = %s AND district = %s
+                    """,
+                    (new_district, property_id, district),
+                )
+                changed = cur.rowcount
+            conn.commit()
+        if changed:
+            repaired.append((int(property_id), unit_code, new_district, bool(address_text)))
+    return repaired
+
+
 async def delayed_extended_source_location_repair(
     application,
 ):
@@ -9146,6 +9194,26 @@ async def delayed_extended_source_location_repair(
     # Telegram posts.  Keep it completely outside the startup window so
     # production health checks can observe a ready bot first.
     await asyncio.sleep(15)
+
+    # Before the category reconcile (150s) so a repaired listing joins its
+    # region's category post.
+    try:
+        repaired = await asyncio.to_thread(repair_feature_line_districts)
+        for property_id, unit_code, district, has_address in repaired:
+            logging.info(
+                "FEATURE-LINE district repaired: unit_code=%s district=%s",
+                unit_code,
+                district,
+            )
+            # The post shows the district only when there is no address.
+            if not has_address:
+                await refresh_published_property_post(application.bot, property_id)
+                await asyncio.sleep(0.35)
+        logging.info("FEATURE-LINE district repair completed: repaired=%s", len(repaired))
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.exception("FEATURE-LINE district repair failed")
 
     try:
         await repair_extended_source_locations(application)
