@@ -64,6 +64,7 @@ from instagram_story import (
     ensure_story_log_schema,
     handle_instagram_story_button,
     handle_instagram_story_text,
+    story_topic,
 )
 from channel_file_editor import (
     ensure_channel_file_editor_schema,
@@ -10188,6 +10189,13 @@ async def post_init(application):
     ensure_transcript_schema()
     ensure_removed_files_schema()
     ensure_story_log_schema()
+    async def open_story_topic():
+        # The «استوری‌ها» topic shows up in the visit group right after a deploy.
+        try:
+            await story_topic(application.bot)
+        except Exception as exc:
+            logging.warning("Story topic unavailable: error=%s", exc)
+    application.bot_data['story_topic_start'] = asyncio.create_task(open_story_topic())
     start_campaign_watch_worker(application)
     start_campaign_broadcast_worker(application)
     start_visit_reminder_worker(application)
@@ -10320,6 +10328,10 @@ async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Channel posts and edited messages also match filters.TEXT; channel
+    # posts carry no user and an edit has no update.message.
+    if not update.effective_user or not update.message:
+        return
     telegram_user_id = update.effective_user.id
     session = get_session(telegram_user_id)
 

@@ -31,6 +31,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from property_parser import KNOWN_DISTRICTS, is_feature_line_district, normalize_text
 from publisher import build_channel_post_url, db_connect, get_destination_channel
+from visit_ops_group import get_visit_ops_target
 
 INSTAGRAM_STORY_ACTION = "insta_story"
 INSTAGRAM_STORY_COUNT_PREFIX = "insta_story_n_"
@@ -49,6 +50,9 @@ STORY_SEND_SPACING_SECONDS = 1.5
 # A listing gets at most one story in this window, whoever asks for it:
 # every story goes to the same Instagram page.
 STORY_REPEAT_HOURS = 48
+# Stories go to this topic of the visit operations group (where visit
+# requests land), so the bot's own chat stays clean.
+STORY_TOPIC_NAME = "استوری‌ها"
 # Every layout keeps its call to action here, clear of Instagram's reply bar.
 # The call to action ends 260px above the bottom, clear of Instagram's
 # reply field.
@@ -114,7 +118,76 @@ def ensure_story_log_schema():
                 ON instagram_story_log (property_id, created_at)
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS instagram_story_topic (
+                    telegram_chat_id BIGINT PRIMARY KEY,
+                    message_thread_id BIGINT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
         conn.commit()
+
+
+def saved_story_topic(chat_id):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT message_thread_id FROM instagram_story_topic WHERE telegram_chat_id = %s",
+                (chat_id,),
+            )
+            row = cur.fetchone()
+    return int(row[0]) if row else None
+
+
+def save_story_topic(chat_id, thread_id):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO instagram_story_topic (telegram_chat_id, message_thread_id)
+                VALUES (%s, %s)
+                ON CONFLICT (telegram_chat_id)
+                DO UPDATE SET message_thread_id = EXCLUDED.message_thread_id, created_at = NOW()
+                """,
+                (chat_id, thread_id),
+            )
+        conn.commit()
+
+
+def forget_story_topic(chat_id):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM instagram_story_topic WHERE telegram_chat_id = %s", (chat_id,))
+        conn.commit()
+
+
+async def story_topic(bot):
+    """
+    (chat_id, thread_id) of the «استوری‌ها» topic in the visit operations
+    group, made the first time; None without that group. Raises when the bot
+    may not create topics there.
+    """
+
+    target = await asyncio.to_thread(get_visit_ops_target)
+    if not target:
+        return None
+    chat_id = int(target[0])
+    thread_id = await asyncio.to_thread(saved_story_topic, chat_id)
+    if thread_id:
+        return chat_id, thread_id
+    topic = await bot.create_forum_topic(chat_id, STORY_TOPIC_NAME)
+    await asyncio.to_thread(save_story_topic, chat_id, topic.message_thread_id)
+    logging.info("Story topic created: chat_id=%s thread_id=%s", chat_id, topic.message_thread_id)
+    return chat_id, topic.message_thread_id
+
+
+def topic_link(chat_id, thread_id):
+    """t.me link to a topic of a supergroup (chat ids -100…)."""
+
+    text = str(chat_id)
+    return f"https://t.me/c/{text[4:]}/{thread_id}" if text.startswith("-100") else None
 
 
 def record_story(property_id, chat_id):
@@ -1153,13 +1226,13 @@ def story_price_keyboard():
     )
 
 
-def story_done_keyboard():
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🔄 ساخت استوری‌های بیشتر", callback_data=INSTAGRAM_STORY_ACTION)],
-            [InlineKeyboardButton("⬅️ بازگشت به تنظیمات", callback_data="settings")],
-        ]
-    )
+def story_done_keyboard(topic_url=None):
+    rows = [[InlineKeyboardButton("📂 رفتن به تاپیک استوری‌ها", url=topic_url)]] if topic_url else []
+    rows += [
+        [InlineKeyboardButton("🔄 ساخت استوری‌های بیشتر", callback_data=INSTAGRAM_STORY_ACTION)],
+        [InlineKeyboardButton("⬅️ بازگشت به تنظیمات", callback_data="settings")],
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
 def _count_prompt():
@@ -1182,14 +1255,37 @@ def _price_prompt(count):
 
 
 async def _download_photos(bot, file_ids):
+    """The photos, each given a minute and a second try: Telegram's 5s default often ran out."""
+
     photos = []
     for file_id in file_ids:
-        try:
-            telegram_file = await bot.get_file(file_id)
-            photos.append(bytes(await telegram_file.download_as_bytearray()))
-        except Exception as exc:
-            logging.warning("Story photo download failed: %s", exc)
+        for attempt in range(2):
+            try:
+                telegram_file = await bot.get_file(file_id, read_timeout=30, connect_timeout=10)
+                data = await telegram_file.download_as_bytearray(read_timeout=60, connect_timeout=10)
+                photos.append(bytes(data))
+                break
+            except Exception as exc:
+                if attempt:
+                    logging.warning("Story photo download failed: %s", exc)
     return photos
+
+
+async def _send_story(bot, chat_id, image, listing, caption, **where):
+    # Sent as a file: Telegram shrinks photos to 720×1280, the file stays
+    # exactly 1080×1920 for Instagram. Uploading it can take a while when
+    # the bot is busy editing the channel.
+    await bot.send_document(
+        chat_id,
+        document=io.BytesIO(image),
+        filename=f"story-{short_code(listing)}.jpg",
+        caption=caption,
+        read_timeout=60,
+        write_timeout=60,
+        connect_timeout=10,
+        pool_timeout=30,
+        **where,
+    )
 
 
 async def make_stories(bot, chat_id, count, price_range=None, rng=random):
@@ -1201,7 +1297,9 @@ async def make_stories(bot, chat_id, count, price_range=None, rng=random):
     )
     low, high = price_range or (None, None)
     first_layout = rng.randrange(len(STORY_LAYOUTS))
-    made = 0
+    made = in_topic = 0
+    topic = topic_url = None
+    topic_failed = False
 
     try:
         listings = await asyncio.to_thread(random_story_listings, count, low, high)
@@ -1211,6 +1309,14 @@ async def make_stories(bot, chat_id, count, price_range=None, rng=random):
             logging.exception("Story channel link unavailable")
             destination = None
         username = destination[2] if destination else None
+        # Stories go to the «استوری‌ها» topic of the visit group so the
+        # bot's chat stays clear; without it they come here as before.
+        try:
+            topic = await story_topic(bot) if listings else None
+        except Exception as exc:
+            logging.warning("Story topic unavailable: error=%s", exc)
+            topic_failed = True
+        topic_url = topic_link(*topic) if topic else None
         for listing in listings:
             if made >= count:
                 break
@@ -1228,25 +1334,27 @@ async def make_stories(bot, chat_id, count, price_range=None, rng=random):
             except ValueError:
                 continue
 
-            # Sent as a file: Telegram shrinks photos to 720×1280, the file
-            # stays exactly 1080×1920 for Instagram. Uploading it can take a
-            # while when the bot is busy editing the channel.
-            try:
-                await bot.send_document(
-                    chat_id,
-                    document=io.BytesIO(image),
-                    filename=f"story-{short_code(listing)}.jpg",
-                    caption=caption,
-                    read_timeout=60,
-                    write_timeout=60,
-                    connect_timeout=10,
-                    pool_timeout=30,
-                )
-            except Exception:
-                logging.exception(
-                    "Instagram story could not be sent: property_id=%s", listing["id"]
-                )
-                continue
+            sent = False
+            if topic:
+                try:
+                    await _send_story(bot, topic[0], image, listing, caption, message_thread_id=topic[1])
+                    sent = True
+                    in_topic += 1
+                except Exception as exc:
+                    # A deleted topic is made again next time; this story
+                    # and the rest of the batch come here instead.
+                    logging.warning("Story topic send failed: chat_id=%s error=%s", topic[0], exc)
+                    if any(word in str(exc).lower() for word in ("thread", "topic")):
+                        await asyncio.to_thread(forget_story_topic, topic[0])
+                    topic, topic_failed = None, True
+            if not sent:
+                try:
+                    await _send_story(bot, chat_id, image, listing, caption)
+                except Exception:
+                    logging.exception(
+                        "Instagram story could not be sent: property_id=%s", listing["id"]
+                    )
+                    continue
             made += 1
             try:
                 await asyncio.to_thread(record_story, listing["id"], chat_id)
@@ -1289,7 +1397,20 @@ async def make_stories(bot, chat_id, count, price_range=None, rng=random):
             f"⚠️ در بازهٔ «{label}» فایل فعال عکس‌داری پیدا نشد که توی "
             f"{persian_digits(STORY_REPEAT_HOURS)} ساعت گذشته استوری نشده باشه."
         )
-    await bot.send_message(chat_id, summary, reply_markup=story_done_keyboard())
+    if in_topic:
+        summary += "\n\n📂 " + (
+            "استوری‌ها توی تاپیک «استوری‌ها» گروه بازدید ارسال شد."
+            if in_topic == made
+            else f"{persian_digits(in_topic)} استوری توی تاپیک «استوری‌ها» گروه بازدید ارسال شد."
+        )
+    if topic_failed and made > in_topic:
+        summary += (
+            f"\n\n⚠️ تاپیک «استوری‌ها» در دسترس نبود؛ {persian_digits(made - in_topic)} استوری "
+            "همین‌جا ارسال شد. ربات باید توی گروه بازدید ادمین باشه و اجازهٔ «مدیریت تاپیک‌ها» داشته باشه."
+        )
+    await bot.send_message(
+        chat_id, summary, reply_markup=story_done_keyboard(topic_url if in_topic else None)
+    )
 
 
 def _start_batch(context, chat_id, count, price_range):

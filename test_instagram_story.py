@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover - local runs without the image stack
 
 class Button:
     def __init__(self, text, callback_data=None, url=None):
-        self.text, self.callback_data = text, callback_data
+        self.text, self.callback_data, self.url = text, callback_data, url
 
 
 class Markup:
@@ -57,6 +57,7 @@ def load_story_module():
             build_channel_post_url=lambda username, message_id: (
                 f"https://t.me/{username.lstrip('@')}/{message_id}" if username and message_id else None),
         ),
+        "visit_ops_group": types.SimpleNamespace(get_visit_ops_target=lambda: None),
     }
     with mock.patch.dict(sys.modules, stubs):
         sys.modules.pop("instagram_story", None)
@@ -376,14 +377,93 @@ class StoryTest(unittest.TestCase):
         calls = self.send_stories(fail_first=False, available=0)
         self.assertIn("۴۸ ساعت گذشته استوری نشده باشه", calls[-1][1])
 
-    def send_stories(self, fail_first, available=4):
+    def test_stories_go_to_the_story_topic_of_the_visit_group(self):
+        calls = self.send_stories(fail_first=False, topic=(-1003001, 55))
+        self.assertEqual(self.sent_to, [(-1003001, 55), (-1003001, 55)])
+        self.assertEqual(calls[-1], ("message", "✅ ۲ استوری ساخته شد (۱۰ تا ۱۲ میلیارد).\n\n"
+                                                "📂 استوری‌ها توی تاپیک «استوری‌ها» گروه بازدید ارسال شد."))
+        self.assertEqual(self.markup.rows[0][0].text, "📂 رفتن به تاپیک استوری‌ها")
+        self.assertEqual(self.markup.rows[0][0].url, "https://t.me/c/3001/55")
+        # The 48 hours count for the admin who asked, wherever the files went.
+        self.assertEqual(self.logged, [(0, 7), (1, 7)])
+
+    def test_without_a_visit_group_stories_come_to_the_chat(self):
+        self.send_stories(fail_first=False)
+        self.assertEqual(self.sent_to, [(7, None), (7, None)])
+        self.assertEqual([row[0].text for row in self.markup.rows],
+                         ["🔄 ساخت استوری‌های بیشتر", "⬅️ بازگشت به تنظیمات"])
+
+    def test_a_deleted_topic_is_forgotten_and_the_batch_comes_here(self):
+        calls = self.send_stories(fail_first=False, topic=(-1003001, 55),
+                                  topic_send_error=RuntimeError("Message thread not found"))
+        self.assertEqual(self.sent_to, [(-1003001, 55), (7, None), (7, None)])
+        self.assertEqual(self.forgotten, [-1003001])
+        self.assertIn("⚠️ تاپیک «استوری‌ها» در دسترس نبود؛ ۲ استوری همین‌جا ارسال شد.", calls[-1][1])
+        self.assertNotIn("📂", calls[-1][1])
+        self.assertIsNone(self.markup.rows[0][0].url)
+        # A slow upload keeps the topic for next time.
+        self.send_stories(fail_first=False, topic=(-1003001, 55), topic_send_error=TimeoutError("Timed out"))
+        self.assertEqual(self.forgotten, [])
+
+    def test_a_topic_the_bot_may_not_make_leaves_stories_here_with_a_hint(self):
+        calls = self.send_stories(fail_first=False, topic_error=RuntimeError("Not enough rights to create a topic"))
+        self.assertEqual(self.sent_to, [(7, None), (7, None)])
+        self.assertIn("اجازهٔ «مدیریت تاپیک‌ها»", calls[-1][1])
+
+    def test_story_topic_is_made_once_and_remembered(self):
+        created, saved = [], []
+
+        class Bot:
+            async def create_forum_topic(self, chat_id, name):
+                created.append((chat_id, name))
+                return types.SimpleNamespace(message_thread_id=77)
+
+        def run(target, thread_id):
+            with mock.patch.object(self.story, "get_visit_ops_target", lambda: target), \
+                    mock.patch.object(self.story, "saved_story_topic", lambda chat_id: thread_id), \
+                    mock.patch.object(self.story, "save_story_topic", lambda *row: saved.append(row)):
+                return asyncio.run(self.story.story_topic(Bot()))
+
+        group = (-1003001, None, "bazdid file nimat")
+        self.assertIsNone(run(None, None))
+        self.assertEqual(run(group, 55), (-1003001, 55))
+        self.assertEqual(created, [])
+        self.assertEqual(run(group, None), (-1003001, 77))
+        self.assertEqual((created, saved), ([(-1003001, "استوری‌ها")], [(-1003001, 77)]))
+
+    def test_topic_link(self):
+        self.assertEqual(self.story.topic_link(-1003001, 55), "https://t.me/c/3001/55")
+        self.assertIsNone(self.story.topic_link(12345, 55))
+
+    def test_photo_download_gets_more_time_and_a_second_try(self):
+        tries = []
+
+        class File:
+            async def download_as_bytearray(self, **timeouts):
+                self_test.assertEqual(timeouts["read_timeout"], 60)
+                return bytearray(b"jpeg")
+
+        class Bot:
+            async def get_file(self, file_id, **timeouts):
+                self_test.assertEqual(timeouts["read_timeout"], 30)
+                tries.append(file_id)
+                if file_id == "dead" or tries.count(file_id) == 1:
+                    raise TimeoutError("Timed out")
+                return File()
+
+        self_test = self
+        photos = asyncio.run(self.story._download_photos(Bot(), ["a", "dead", "b"]))
+        self.assertEqual(photos, [b"jpeg", b"jpeg"])
+        self.assertEqual(tries, ["a", "a", "dead", "dead", "b", "b"])
+
+    def send_stories(self, fail_first, available=4, topic=None, topic_error=None, topic_send_error=None):
         data = photo((90, 120, 160))
         calls = []
-        self.logged = []
+        self.logged, self.sent_to, self.forgotten = [], [], []
         self_test = self
 
         class File:
-            async def download_as_bytearray(self):
+            async def download_as_bytearray(self, **timeouts):
                 return bytearray(data)
 
         class Message:
@@ -396,15 +476,20 @@ class StoryTest(unittest.TestCase):
         class Bot:
             async def send_message(self, chat_id, text, reply_markup=None):
                 calls.append(("message", text))
+                self_test.markup = reply_markup
                 return Message()
 
-            async def get_file(self, file_id):
+            async def get_file(self, file_id, **timeouts):
                 return File()
 
             async def send_photo(self, *args, **kwargs):
                 calls.append(("photo",))
 
-            async def send_document(self, chat_id, document, filename, caption, **timeouts):
+            async def send_document(self, chat_id, document, filename, caption, message_thread_id=None,
+                                    **timeouts):
+                self_test.sent_to.append((chat_id, message_thread_id))
+                if message_thread_id and topic_send_error:
+                    raise topic_send_error
                 if fail_first and not any(c[0] == "failed" for c in calls):
                     calls.append(("failed",))
                     raise TimeoutError("Timed out")
@@ -426,7 +511,14 @@ class StoryTest(unittest.TestCase):
             self.assertEqual((kicker, headline), ("منطقه: ولیعصر جنوبی", "۸۱ متر، ۲ خواب"))
             return real_render(photos, listing, kicker, headline, layout)
 
+        async def story_topic(bot):
+            if topic_error:
+                raise topic_error
+            return topic
+
         with mock.patch.object(self.story, "random_story_listings", return_value=listings) as pick, \
+                mock.patch.object(self.story, "story_topic", story_topic), \
+                mock.patch.object(self.story, "forget_story_topic", self.forgotten.append), \
                 mock.patch.object(self.story, "render_story", render), \
                 mock.patch.object(self.story, "record_story", lambda *row: self.logged.append(row)), \
                 mock.patch.object(self.story, "STORY_SEND_SPACING_SECONDS", 0), \
@@ -513,6 +605,18 @@ class StoryRepeatDatabaseTest(unittest.TestCase):
             # Another admin's story counts too; one older than 48 hours does not.
             self.assertEqual(pick(), [2])
 
+    def test_the_story_topic_is_remembered_per_group(self):
+        with self.connect() as conn:
+            conn.execute("DROP TABLE IF EXISTS instagram_story_topic")
+        with mock.patch.object(self.story, "db_connect", self.connect):
+            self.story.ensure_story_log_schema()
+            self.assertIsNone(self.story.saved_story_topic(-1003001))
+            self.story.save_story_topic(-1003001, 55)
+            self.story.save_story_topic(-1003001, 56)  # made again after a delete
+            self.assertEqual(self.story.saved_story_topic(-1003001), 56)
+            self.story.forget_story_topic(-1003001)
+            self.assertIsNone(self.story.saved_story_topic(-1003001))
+
 
 class WiringTest(unittest.TestCase):
     def test_access_button_and_count_routing(self):
@@ -527,6 +631,11 @@ class WiringTest(unittest.TestCase):
                         bot.index('if action == INSTAGRAM_STORY_ACTION or action.startswith(f"{INSTAGRAM_STORY_ACTION}_"):'))
         self.assertIn("allowed=check_action_access(session, INSTAGRAM_STORY_ACTION)", bot)
         self.assertIn("    ensure_story_log_schema()\n", bot)
+        self.assertIn("            await story_topic(application.bot)\n", bot)
+        # Channel posts and edits match filters.TEXT but have no user or message.
+        handler = bot[bot.index("async def text_handler("):]
+        self.assertLess(handler.index("if not update.effective_user or not update.message:\n        return"),
+                        handler.index("update.effective_user.id"))
         # The unit search finds a listing by the short code the stories ask for.
         self.assertEqual(bot.count("OR internal_sequence::text = %s"), 1)
         self.assertEqual(bot.count("OR p.internal_sequence::text = %s"), 1)
