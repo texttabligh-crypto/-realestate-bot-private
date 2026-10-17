@@ -13953,6 +13953,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id, username, display_name, role = session
     action = query.data
+    # A price typed for the PDF counts only while its menu is open.
+    if not action.startswith("export_properties_pdf"):
+        context.user_data.pop("pdf_price_custom", None)
 
     if action == "customer_campaigns":
         await query.edit_message_text(
