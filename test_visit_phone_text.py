@@ -23,7 +23,8 @@ def load(names, namespace):
     nodes = [
         n for n in tree.body
         if getattr(n, "name", None) in names
-        or (isinstance(n, ast.Assign) and getattr(n.targets[0], "id", None) == "_MOBILE_IN_TEXT")
+        or (isinstance(n, ast.Assign)
+            and getattr(n.targets[0], "id", None) in {"_MOBILE_IN_TEXT", "PENDING_SHOWCASE_KEY"})
     ]
     namespace.update({"re": re, "normalize_iran_phone": normalize_iran_phone})
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "visit_flow.py", "exec"), namespace)
@@ -70,20 +71,30 @@ class Update:
 
 
 class VisitPhoneTextTest(unittest.TestCase):
-    def run_handler(self, text, pending=(1, 42, 250)):
+    def run_handler(self, text, pending=(1, 42, 250), context=None):
         calls = []
 
         async def complete(update, context, *, customer_id, property_id):
             calls.append(("complete", customer_id, property_id))
+
+        async def saved(update, context):
+            calls.append(("showcase", context.user_data["pending_showcase_token"]))
 
         ns = load({"typed_mobile_number", "handle_visit_phone_text"}, {
             "get_customer_by_telegram_id": lambda uid: (42,),
             "get_pending_visit": lambda cid: pending,
             "save_customer_phone": lambda **kw: calls.append(("phone", kw["phone_number"])),
             "_complete_visit_request": complete,
+            "_phone_saved_without_request": saved,
         })
-        handled = asyncio.run(ns["handle_visit_phone_text"](Update(text), None))
+        handled = asyncio.run(ns["handle_visit_phone_text"](Update(text), context))
         return handled, calls
+
+    def test_typed_number_resumes_a_waiting_showcase(self):
+        context = type("Context", (), {"user_data": {"pending_showcase_token": "Cnt4w8"}})()
+        handled, calls = self.run_handler("0914 413 9040", pending=None, context=context)
+        self.assertTrue(handled)
+        self.assertEqual(calls, [("phone", "09144139040"), ("showcase", "Cnt4w8")])
 
     def test_typed_number_completes_the_waiting_visit(self):
         handled, calls = self.run_handler("09144139040")

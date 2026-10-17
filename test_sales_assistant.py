@@ -54,6 +54,7 @@ def load_assistant():
             _parse_json_object=helpers["_parse_json_object"],
             get_active_search_context=lambda user_id: None,
             normalize_search_filters=lambda raw: {k: v for k, v in dict(raw or {}).items() if v is not None},
+            search_count=lambda filters: 0,
             search_rows=lambda filters, limit=3: [],
         ),
     }
@@ -127,6 +128,36 @@ class SalesAssistantTest(unittest.TestCase):
                 mock.patch.object(self.assistant, "_ask_openai", return_value=answer):
             return self.assistant.assistant_turn(1, "آرمین", context["customer_message"])
 
+    def test_other_cities(self):
+        city = self.assistant.other_city_in
+        for text, expected in (
+            ("من یک واحد ۸۵ متری در مناطق شمال وشرق و مرکز تهران میخوام", "تهران"),
+            ("تو کرج چی دارید؟", "کرج"),
+            ("آپارتمان در اصفهان", "اصفهان"),
+            ("خیابان تهران چی دارید؟", None),
+            ("از تهران دارم میام تبریز، ولیعصر چی دارید؟", None),
+            ("بچه تهرانیم ولی دنبال خونه‌ام", None),
+            ("ولیعصر ۸۵ متر", None),
+        ):
+            self.assertEqual(city(text), expected, text)
+
+    def test_the_same_search_is_not_offered_again(self):
+        context = dict(self.context(), active_search={"area_min": 76, "area_max": 94})
+        with mock.patch.object(self.assistant, "build_context", return_value=(context, [])), \
+                mock.patch.object(self.assistant, "_ask_openai", return_value={
+                    "reply": "می‌گردم", "action": "search", "filters": {"area_min": 76, "area_max": 94}}):
+            self.assertEqual(self.assistant.assistant_turn(1, None, "x")["action"], "none")
+        with mock.patch.object(self.assistant, "build_context", return_value=(context, [])), \
+                mock.patch.object(self.assistant, "_ask_openai", return_value={
+                    "reply": "می‌گردم", "action": "search", "filters": {"area_min": 70, "area_max": 100}}):
+            self.assertEqual(self.assistant.assistant_turn(1, None, "x")["action"], "search")
+
+    def test_instructions_cover_tabriz_only_sold_codes_and_empty_searches(self):
+        text = self.assistant.INSTRUCTIONS
+        self.assertIn("Tabriz only", text)
+        self.assertIn('"codes_not_found"', text)
+        self.assertIn('"active_search_matches" is\n  0', text)
+
     def test_visit_action_resolves_the_listing(self):
         turn = self.ask({"reply": "عالیه! الان ثبتش می‌کنم 🌷", "action": "visit", "unit_code": "۳۰۸۲۵"})
         self.assertEqual((turn["action"], turn["listing"]["id"]), ("visit", 357))
@@ -170,16 +201,21 @@ class SalesAssistantTest(unittest.TestCase):
         with mock.patch.object(assistant, "recent_history", return_value=HISTORY), \
                 mock.patch.object(assistant, "find_listing_by_code", side_effect=lambda code: LISTING if code == "30825" else None):
             context, listings = assistant.build_context(1, "آرمین", "نورگیرش خوبه؟")
+            self.assertEqual(context["codes_not_found"], [])
+            # «۲۷۲۹» is no longer live: the model is told, so it doesn't hand it off.
+            self.assertEqual(assistant.build_context(1, None, "۲۷۲۹")[0]["codes_not_found"], ["2729"])
         self.assertEqual([item["code"] for item in context["listings"]], ["30825"])
         self.assertEqual(listings, [LISTING])
         row = (9, "40010", "رشدیه", None, Decimal("90"), 2, 1400, Decimal("10"), None, 7)
         with mock.patch.object(assistant, "recent_history", return_value=[]), \
                 mock.patch.object(assistant, "get_active_search_context",
                                   return_value={"filters": {"price_max_billion": 11}}), \
-                mock.patch.object(assistant, "search_rows", return_value=[row]):
+                mock.patch.object(assistant, "search_rows", return_value=[row]), \
+                mock.patch.object(assistant, "search_count", return_value=4):
             context, listings = assistant.build_context(1, None, "چی دارید؟")
         self.assertEqual(context["listings"][0]["code"], "40010")
         self.assertEqual(context["active_search"], {"price_max_billion": 11})
+        self.assertEqual(context["active_search_matches"], 4)
 
 
 @unittest.skipUnless(psycopg and DSN, "set PGTEST_DSN to a scratch PostgreSQL")

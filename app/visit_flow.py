@@ -863,6 +863,10 @@ async def start_visit_request(
     return True
 
 
+# A showcase link waiting for the customer's phone (customer_showcase keeps
+# it here beside the conversation state, which another path may reset).
+PENDING_SHOWCASE_KEY = "pending_showcase_token"
+
 _MOBILE_IN_TEXT = re.compile(r"(?<!\d)(?:\+?98|0098|0)?9\d{9}(?!\d)")
 
 
@@ -920,7 +924,18 @@ async def handle_visit_phone_text(
     )
 
     if not pending:
-        return False
+        # A showcase link that was waiting for this number.
+        if not (getattr(context, "user_data", None) or {}).get(PENDING_SHOWCASE_KEY):
+            return False
+        save_customer_phone(
+            telegram_user_id=user.id,
+            phone_number=phone,
+        )
+        await _phone_saved_without_request(
+            update,
+            context,
+        )
+        return True
 
     save_customer_phone(
         telegram_user_id=user.id,
@@ -935,6 +950,28 @@ async def handle_visit_phone_text(
     )
 
     return True
+
+
+async def _phone_saved_without_request(
+    update,
+    context,
+):
+    """After a phone nothing was waiting for: the showcase it was asked for, else a nudge."""
+    from customer_showcase import resume_pending_showcase
+
+    if await resume_pending_showcase(
+        update,
+        context,
+    ):
+        return
+
+    await update.effective_message.reply_text(
+        "ممنون 🌷 شماره‌تون ثبت شد ✅\n\n"
+        "حالا بگید دنبال چه فایلی هستید (بودجه، منطقه، متراژ) "
+        "یا کد فایلی که توی کانال دیدید رو بفرستید تا "
+        "مشخصاتش رو براتون بفرستم.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
 
 async def handle_visit_contact(
@@ -953,30 +990,6 @@ async def handle_visit_contact(
         update.effective_message.contact
     )
 
-    customer = (
-        get_customer_by_telegram_id(
-            user.id
-        )
-    )
-
-    if not customer:
-        await update.effective_message.reply_text(
-            "درخواست فعالی برای ثبت شماره ندارید.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return
-
-    pending = get_pending_visit(
-        customer[0]
-    )
-
-    if not pending:
-        await update.effective_message.reply_text(
-            "درخواست فعالی برای ثبت شماره ندارید.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return
-
     if (
         contact.user_id is None
         or contact.user_id != user.id
@@ -988,16 +1001,39 @@ async def handle_visit_contact(
         )
         return
 
+    customer = (
+        get_customer_by_telegram_id(
+            user.id
+        )
+        or upsert_customer_profile(
+            telegram_user_id=user.id,
+            telegram_username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+        )
+    )
+
+    # The customer shared their own number: keep it even when nothing is
+    # waiting for it, instead of answering «درخواست فعالی ... ندارید».
     save_customer_phone(
         telegram_user_id=user.id,
         phone_number=contact.phone_number,
     )
 
-    property_id = pending[2]
+    pending = get_pending_visit(
+        customer[0]
+    )
 
-    await _complete_visit_request(
+    if pending:
+        await _complete_visit_request(
+            update,
+            context,
+            customer_id=customer[0],
+            property_id=pending[2],
+        )
+        return
+
+    await _phone_saved_without_request(
         update,
         context,
-        customer_id=customer[0],
-        property_id=property_id,
     )

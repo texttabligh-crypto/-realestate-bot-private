@@ -24,7 +24,7 @@ from telegram import (
 from crm_panel import parse_visit_datetime, TEHRAN
 from publisher import publish_property
 from visit_ops_group import get_visit_ops_target, telegram_thread_kwargs
-from sales_assistant import assistant_turn
+from sales_assistant import assistant_turn, other_city_in
 from listing_offer import (
     LISTING_OFFER_STATE,
     SIMILAR_CALLBACK_PREFIX,
@@ -763,7 +763,7 @@ def _budget_text(low: Decimal, high: Decimal, rows, offset, total):
     if rows:
         lines.extend([
             "برای صفحه‌های بعدی از دکمه‌های زیر استفاده کنید 👇",
-            "برای بازدید هم کافی است بنویسید: «برای کد ۲۷۲۹ وقت بازدید می‌خوام»",
+            "📅 برای بازدید، کافیه کد فایل مدنظرتون رو بفرستید تا مشخصاتش رو بفرستم و بازدید رو هماهنگ کنیم 🌷",
         ])
     return "\n".join(lines).strip()
 
@@ -1860,7 +1860,19 @@ def _search_confirmation_keyboard():
     ])
 
 
+def widen_exact_area(filters):
+    """«متراژ ۸۵» means about 85: an exact area becomes 90%–110% of it."""
+
+    filters = dict(filters or {})
+    low, high = filters.get("area_min"), filters.get("area_max")
+    if low and high and low == high:
+        filters["area_min"] = int(math.floor(low * 0.9))
+        filters["area_max"] = int(math.ceil(high * 1.1))
+    return filters
+
+
 async def _offer_search_confirmation(update, context, filters, query_text, customer_id):
+    filters = widen_exact_area(filters)
     context.user_data["smart_pending_search"] = {
         "filters": dict(filters or {}),
         "query_text": query_text,
@@ -2013,6 +2025,17 @@ async def handle_customer_text(update, context):
                 "فایل‌های مشابه رو براتون بفرستم."
             )
             return True
+
+    # ShahFile has listings in Tabriz only: say so at once instead of
+    # searching «شمال تهران» and finding nothing.
+    other_city = other_city_in(text) if state == "IDLE" else None
+    if other_city:
+        await update.message.reply_text(
+            f"ممنون از پیامتون 🌷 ShahFile فعلاً فقط توی تبریز فایل داره و در {other_city} فعالیتی نداریم.\n\n"
+            "اگه خرید توی تبریز هم براتون جذابه، بودجه و منطقهٔ مدنظرتون رو بگید "
+            "تا بهترین گزینه‌ها رو براتون بفرستم."
+        )
+        return True
 
     # A bare «11» is a budget: offer homes around 11 billion for the customer
     # to confirm, instead of sending it to an advisor as a question.
@@ -2603,8 +2626,7 @@ async def handle_customer_callback(update, context, session=None):
             "• ۶ تا ۸ میلیارد چی دارین؟\n"
             "• ۸۰ تا ۱۱۰ متر در ولیعصر\n"
             "• سه خواب با پارکینگ زیر ۱۵ میلیارد\n"
-            "• کد ۲۷۲۹ (مشخصات و قیمتش رو می‌فرستم)\n"
-            "• برای کد ۲۷۲۹ وقت بازدید می‌خوام\n\n"
+            "• کد فایلی که توی کانال یا استوری دیدید (مشخصات و قیمتش رو می‌فرستم و بازدید رو هماهنگ می‌کنیم)\n\n"
             "درخواستت رو همینجا بفرست 👇",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⬅️ بازگشت", callback_data="sc_home")
