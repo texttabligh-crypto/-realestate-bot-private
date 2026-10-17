@@ -839,13 +839,13 @@ def search_page(subscription_id, telegram_user_id, offset=0):
         lines.extend([
             "فعلاً فایل فعالی مطابق این درخواست پیدا نکردم.",
             "",
-            "برای بازدید کافی است کد واحد را همراه کلمه «بازدید» بفرستید.",
+            "اگه بودجه، متراژ یا منطقه رو کمی بازتر بگید، گزینه‌های بیشتری براتون پیدا می‌کنم 🌷",
         ])
     else:
         for index, row in enumerate(rows, start=offset + 1):
             lines.append(property_card_text(row, index=index))
             lines.extend(["", "──────────────", ""])
-        lines.append("برای بازدید کافی است کد واحد را همراه کلمه «بازدید» بفرستید.")
+        lines.append("📅 برای بازدید، کافیه کد فایل مدنظرتون رو بفرستید تا مشخصاتش رو بفرستم و بازدید رو هماهنگ کنیم 🌷")
 
     # Keep the cancellation guidance once at the bottom of the
     # complete page instead of repeating it inside every property card.

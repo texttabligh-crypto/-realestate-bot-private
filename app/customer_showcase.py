@@ -26,6 +26,7 @@ from shahfile_ai import (
     search_count,
     search_rows,
 )
+from visit_flow import PENDING_SHOWCASE_KEY
 from shahfile_smart import (
     clear_conversation,
     get_customer,
@@ -975,11 +976,7 @@ def render_showcase(
 
     lines.extend(
         [
-            (
-                "📅 برای گرفتن وقت بازدید، فقط کافیه "
-                "کلمه «بازدید» رو به همراه کد فایل ارسال کنید."
-            ),
-            "مثال: بازدید ۲۷۲۹",
+            "📅 برای بازدید، کافیه کد فایل مدنظرتون رو بفرستید تا مشخصاتش رو بفرستم و بازدید رو هماهنگ کنیم 🌷",
         ]
     )
 
@@ -1075,6 +1072,19 @@ def _record_catalog_message(
         conn.commit()
 
 
+def remember_pending_showcase(context, token):
+    context.user_data[PENDING_SHOWCASE_KEY] = token
+
+
+async def resume_pending_showcase(update, context):
+    """Show the showcase a customer was asked their phone for, once it is saved."""
+
+    token = context.user_data.pop(PENDING_SHOWCASE_KEY, None)
+    if not token:
+        return False
+    return await complete_showcase_registration(update, context, token)
+
+
 async def complete_showcase_registration(
     update,
     context,
@@ -1103,6 +1113,7 @@ async def complete_showcase_registration(
         not customer
         or not customer[4]
     ):
+        remember_pending_showcase(context, token)
         set_conversation(
             user.id,
             "SHOWCASE_PHONE",
@@ -1135,6 +1146,7 @@ async def complete_showcase_registration(
         user.id,
         customer_id=customer[0],
     )
+    context.user_data.pop(PENDING_SHOWCASE_KEY, None)
 
     text, keyboard, offset = (
         render_showcase(
@@ -1209,6 +1221,7 @@ async def handle_showcase_start(
     )
 
     if not phone_number:
+        remember_pending_showcase(context, token)
         set_conversation(
             update.effective_user.id,
             "SHOWCASE_PHONE",
@@ -1855,10 +1868,7 @@ def _new_match_text(
     lines.extend(
         [
             "",
-            (
-                "برای گرفتن وقت بازدید، کلمه «بازدید» "
-                "را همراه کد فایل ارسال کنید."
-            ),
+            "📅 برای بازدید، کافیه کد فایل مدنظرتون رو بفرستید تا مشخصاتش رو بفرستم و بازدید رو هماهنگ کنیم 🌷",
         ]
     )
 

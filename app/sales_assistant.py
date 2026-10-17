@@ -21,13 +21,14 @@ import re
 import urllib.request
 from decimal import Decimal, InvalidOperation
 
-from listing_offer import find_listing_by_code
+from listing_offer import find_listing_by_code, parse_listing_code
 from publisher import build_channel_post_url, clean_publish_location, db_connect, get_destination_channel
 from shahfile_ai import (
     _extract_response_text,
     _parse_json_object,
     get_active_search_context,
     normalize_search_filters,
+    search_count,
     search_rows,
 )
 
@@ -44,10 +45,35 @@ _MONEY = re.compile(r"(\d+(?:\.\d+)?)\s*(میلیارد|ملیارد|میلیو�
 _PHONE = re.compile(r"(?:\+?98|0)?9\d{2}[\s\-]?\d{3}[\s\-]?\d{4}")
 _LINK = re.compile(r"https?://\S+|t\.me/\S+|www\.\S+", re.IGNORECASE)
 
+# ShahFile has listings in Tabriz only.
+OTHER_CITIES = (
+    "تهران", "کرج", "اصفهان", "شیراز", "مشهد", "ارومیه", "اردبیل", "زنجان", "قم", "رشت",
+    "اهواز", "کرمانشاه", "همدان", "قزوین", "یزد", "کرمان", "ساری", "گرگان", "کیش",
+)
+_OTHER_CITY = re.compile(r"(?<![\w\u200c])(" + "|".join(OTHER_CITIES) + r")(?![\w\u200c])")
+# «خیابان تهران» or «جاده تهران» is a street or road, not the city.
+_STREET_BEFORE = re.compile(r"(?:خیابان|خ\.|جاده|اتوبان|بزرگراه|بلوار|میدان|کوی|کوچه|شهرک|مجتمع|برج)\s*$")
+
+
+def other_city_in(text):
+    """The other city a customer wants a home in («شمال تهران»), else None."""
+
+    raw = str(text or "")
+    if "تبریز" in raw:
+        return None
+    for match in _OTHER_CITY.finditer(raw):
+        if not _STREET_BEFORE.search(raw[: match.start()]):
+            return match.group(1)
+    return None
+
 INSTRUCTIONS = """
 You are ShahFile's real-estate advisor in Tabriz, chatting with a customer on
 Telegram. Write casual, warm, polite Persian (محاوره‌ای، صمیمی و مؤدب), like a
 friendly advisor who wants to help them find the right home.
+
+ShahFile has listings in Tabriz only. If they want another city, say warmly
+that we only work in Tabriz for now and ask whether Tabriz could suit them;
+never search or promise other cities.
 
 Goals, in order: understand what they need, build trust, suggest suitable
 listings from the facts you are given, and move toward booking a visit
@@ -70,7 +96,12 @@ Hard rules:
 - If they want to see or visit a listing from "listings", set action "visit"
   with its code.
 - If they describe what they want to buy (budget, size, rooms, area), set
-  action "search" with the filters they gave.
+  action "search" with the filters they gave. If "active_search_matches" is
+  0, that search found nothing: don't offer it again, suggest widening the
+  budget, size or area instead.
+- If "codes_not_found" lists a code they asked about, that listing is no
+  longer available (maybe sold): say so kindly and offer to find similar
+  ones by asking their budget and area. Don't hand this off.
 - 1 to 4 short sentences of plain text (no Markdown), at most two emoji.
   Don't greet again if the conversation has already started; use their first
   name now and then.
@@ -164,14 +195,21 @@ def build_context(telegram_user_id, first_name, message):
         listing = find_listing_by_code(code)
         if listing:
             listings.append(listing)
+    asked = parse_listing_code(message)
+    codes_not_found = [asked[0]] if asked and not find_listing_by_code(asked[0]) else []
+
     search = get_active_search_context(telegram_user_id) or {}
-    if not listings and search.get("filters"):
-        listings = _search_listings(normalize_search_filters(search["filters"]))
+    filters = normalize_search_filters(search.get("filters") or {})
+    matches = search_count(filters) if filters else None
+    if not listings and matches:
+        listings = _search_listings(filters)
     return {
         "customer_first_name": first_name or None,
         "history": history,
         "listings": [listing_facts(item, username) for item in listings],
         "active_search": search.get("filters") or None,
+        "active_search_matches": matches,
+        "codes_not_found": codes_not_found,
         "customer_message": _without_phones(message),
     }, listings
 
@@ -270,6 +308,9 @@ def assistant_turn(telegram_user_id, first_name, message):
         if listing is None:
             action = "none"
     filters = normalize_search_filters(answer.get("filters") or {}) if action == "search" else {}
-    if action == "search" and not filters:
+    active = context.get("active_search") or {}
+    # No filters, or the search the customer already has: offering it again
+    # is the loop customers saw («۸۵ تا ۸۵ متر، تهران» → 0 → again).
+    if action == "search" and (not filters or all(active.get(k) == v for k, v in filters.items())):
         action = "none"
     return {"reply": reply, "action": action, "listing": listing, "filters": filters}
