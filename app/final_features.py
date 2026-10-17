@@ -479,6 +479,33 @@ def _fa_billion_value(value):
     return fa_num(text)
 
 
+def _parse_pdf_price_range(text):
+    """
+    (min, max) in billions from «۹ تا ۱۱ میلیارد», «۱۲ ۱۸», «زیر ۸» or
+    «بالای ۲۰» (None for an open end); None when the text is not a range.
+    """
+
+    raw = norm_digits(text).replace('٫', '.').replace('،', ' ').replace(',', ' ')
+    numbers = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', raw)]
+    if len(numbers) == 2:
+        low, high = sorted(numbers)
+        return (low, high) if high > 0 else None
+    if len(numbers) == 1 and numbers[0] > 0:
+        if re.search(r'زیر|کمتر|حداکثر|سقف|^\s*تا', raw):
+            return None, numbers[0]
+        if re.search(r'بالا|بیشتر|حداقل', raw):
+            return numbers[0], None
+    return None
+
+
+def _pdf_price_label(min_billion, max_billion):
+    if min_billion is None:
+        return f'تا {_fa_billion_value(max_billion)} میلیارد تومان'
+    if max_billion is None:
+        return f'بالای {_fa_billion_value(min_billion)} میلیارد تومان'
+    return f'{_fa_billion_value(min_billion)} تا {_fa_billion_value(max_billion)} میلیارد تومان'
+
+
 async def _send_property_pdf(update, context, session, min_billion=None, max_billion=None, label='همه قیمت‌ها'):
     min_toman = None if min_billion is None else int(round(float(min_billion) * 1_000_000_000))
     max_toman = None if max_billion is None else int(round(float(max_billion) * 1_000_000_000))
@@ -600,11 +627,13 @@ async def handle_button(update,context,session):
             await q.answer('دسترسی ندارید.',show_alert=True)
             return True
 
-        context.user_data.pop('pdf_price_custom', None)
+        # A range typed while this menu is open works without «بازه دلخواه».
+        context.user_data['pdf_price_custom'] = 'menu'
 
         await q.edit_message_text(
             '📄 دانلود PDF فایل‌های فعال\n\n'
-            'بازه قیمتی موردنظر را انتخاب کنید:',
+            'بازه قیمتی موردنظر را انتخاب کنید\n'
+            'یا بنویسید؛ مثلاً «۹ تا ۱۱»، «زیر ۸» یا «بالای ۲۰».',
             reply_markup=_pdf_price_menu(),
         )
         return True
@@ -641,7 +670,8 @@ async def handle_button(update,context,session):
             'مثال:\n'
             '۱۲ ۱۸\n\n'
             'یا:\n'
-            '۱۲.۵ تا ۱۸\n\n'
+            '۱۲.۵ تا ۱۸\n'
+            'یا: زیر ۸ / بالای ۲۰\n\n'
             'برای مثال بالا، فقط فایل‌های ۱۲ تا ۱۸ میلیارد وارد PDF می‌شوند.',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton('⬅️ بازگشت به بازه‌ها', callback_data='export_properties_pdf')]
@@ -741,57 +771,39 @@ async def handle_button(update,context,session):
     return False
 
 async def handle_aux_text(update,context,session):
-    if context.user_data.get('pdf_price_custom'):
+    mode = context.user_data.get('pdf_price_custom')
+    if mode:
         if not update.message or not update.message.text:
             return False
 
-        if not _has_perm(session,'reports_export'):
-            context.user_data.pop('pdf_price_custom', None)
-            await update.message.reply_text('⛔ دسترسی ندارید.')
-            return True
-
-        raw = norm_digits(update.message.text)
-        raw = raw.replace('٫', '.').replace('،', ' ').replace(',', ' ')
-
-        numbers = re.findall(r'\d+(?:\.\d+)?', raw)
-
-        if len(numbers) != 2:
+        price_range = _parse_pdf_price_range(update.message.text)
+        if not price_range:
+            if mode == 'menu':
+                # Not a price: the text is for something else.
+                context.user_data.pop('pdf_price_custom', None)
+                return False
             await update.message.reply_text(
                 '❌ بازه قابل تشخیص نیست.\n\n'
                 'حداقل و حداکثر را در یک پیام بفرستید.\n'
                 'مثال: ۱۲ ۱۸\n'
-                'یا: ۱۲.۵ تا ۱۸'
-            )
-            return True
-
-        try:
-            min_billion = float(numbers[0])
-            max_billion = float(numbers[1])
-        except Exception:
-            await update.message.reply_text('❌ اعداد بازه معتبر نیستند.')
-            return True
-
-        if min_billion < 0 or max_billion <= 0 or min_billion > max_billion:
-            await update.message.reply_text(
-                '❌ بازه قیمت معتبر نیست.\n'
-                'عدد اول باید از عدد دوم کوچک‌تر یا مساوی باشد.'
+                'یا: ۱۲.۵ تا ۱۸\n'
+                'یا: زیر ۸ / بالای ۲۰'
             )
             return True
 
         context.user_data.pop('pdf_price_custom', None)
+        if not _has_perm(session,'reports_export'):
+            await update.message.reply_text('⛔ دسترسی ندارید.')
+            return True
 
-        label = (
-            f'{_fa_billion_value(min_billion)} تا '
-            f'{_fa_billion_value(max_billion)} میلیارد تومان'
-        )
-
+        min_billion, max_billion = price_range
         await _send_property_pdf(
             update,
             context,
             session,
             min_billion=min_billion,
             max_billion=max_billion,
-            label=label,
+            label=_pdf_price_label(min_billion, max_billion),
         )
         return True
 
