@@ -5,7 +5,7 @@ real photos and own facts in one of four layouts: a red title band with a
 factual title (no slogan), tiles for the other facts, checked amenities, and
 the photos filling whatever room is left. OpenAI only writes the caption, the
 price and the channel handle are left out, the call to action asks viewers to
-comment the short code, and every story is sent as a 1080×1920 file.
+send the short code as a story reply, and every story is sent as a 1080×1920 file.
 """
 import asyncio
 import io
@@ -87,12 +87,18 @@ class StoryTest(unittest.TestCase):
     def setUp(self):
         self.story = load_story_module()
 
-    def test_facts_and_comment_call_to_action(self):
+    def test_story_asks_viewers_to_send_the_code_not_comment(self):
+        source = (APP / "instagram_story.py").read_text(encoding="utf-8")
+        self.assertNotIn("کامنت", source)
+        self.assertIn('before, after = "عدد", "رو ارسال کنید"', source)
+        self.assertIn('"ارسال کن"', source)
+
+    def test_facts_and_send_the_code_call_to_action(self):
         self.assertEqual(self.story.story_facts(LISTING), [
             "ولیعصر جنوبی", "۸۱ متر", "۲ خواب", "طبقه ۵ از ۴", "ساخت ۱۳۹۰", "آسانسور", "انباری",
         ])
         self.assertEqual(self.story.call_to_action(LISTING),
-                         "برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو کامنت کنید")
+                         "برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو ارسال کنید")
 
     def test_short_code_is_the_sequence(self):
         self.assertEqual(self.story.short_code(LISTING), "273")
@@ -142,7 +148,7 @@ class StoryTest(unittest.TestCase):
             "🏢 طبقه ۵ از ۴ • ساخت ۱۳۹۰",
             "✅ آسانسور • انباری",
             "",
-            "💬 برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو کامنت کنید",
+            "💬 برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو ارسال کنید",
             "",
             "#ولیعصر_جنوبی #املاک_تبریز #خرید_آپارتمان #تبریز #خانه_رویایی",
         ]))
@@ -150,7 +156,7 @@ class StoryTest(unittest.TestCase):
                     build_year=None, has_elevator=False, has_storage=False)
         caption = self.story.fallback_caption(bare)
         self.assertEqual(caption.split("\n\n")[0], "🏡 فایل ویژه | تبریز")
-        self.assertIn("عدد ۲۷۳ رو کامنت کنید", caption)
+        self.assertIn("عدد ۲۷۳ رو ارسال کنید", caption)
         self.assertIsNone(PRICE_WORDS.search(caption))
 
     def test_four_layouts_render_full_hd_stories(self):
@@ -159,7 +165,7 @@ class StoryTest(unittest.TestCase):
                          ["classic", "magazine", "mosaic", "cinematic"])
         cta_middle = story.CTA_TOP + story.CTA_HEIGHT // 2
         # The call to action ends at least 250px above the bottom, clear of
-        # Instagram's comment field.
+        # Instagram's reply field.
         self.assertLessEqual(story.CTA_TOP + story.CTA_HEIGHT, 1920 - 250)
         for listing in (LISTING, dict(LISTING, floor_text=None, build_year=None, has_elevator=False)):
             info = story._info(listing, *story.story_titles(listing), 1080)
@@ -303,16 +309,16 @@ class StoryTest(unittest.TestCase):
             "۸۱ متر، ۲ خواب در ولیعصر جنوبی",
             "#تبریز",
             "",
-            "💬 برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو کامنت کنید",
+            "💬 برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو ارسال کنید",
         ]))
         facts = json.loads(sent["input"])
         self.assertEqual(facts["facts"][1], "۸۱ متر")
-        self.assertEqual(facts["call_to_action"], "برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو کامنت کنید")
+        self.assertEqual(facts["call_to_action"], "برای دریافت قیمت و مشخصات، عدد ۲۷۳ رو ارسال کنید")
         self.assertNotIn("price", sent["input"])
         self.assertIn("Do not open with a slogan", sent["instructions"])
 
     def test_openai_caption_with_the_code_is_kept_as_written(self):
-        written = "۸۱ متری نورگیر\n💬 عدد ۲۷۳ رو کامنت کنید"
+        written = "۸۱ متری نورگیر\n💬 عدد ۲۷۳ رو ارسال کنید"
         self.assertEqual(self.openai(written)[0], written)
 
     def test_empty_or_failed_openai_caption_falls_back_to_the_template(self):

@@ -7,7 +7,7 @@ Each story is built from the listing's real photos and own facts: a red band
 with a factual title (no slogan), tiles for the other facts and checked
 amenities, with the photos filling whatever room is left. OpenAI only writes
 the Instagram caption (a factual template is used when it is not available). The price is left out
-on purpose: the call to action asks viewers to comment the short code. No
+on purpose: the call to action asks viewers to send the short code. No
 source text, agency name, phone number or channel handle is ever drawn, and
 photos are never generated or altered.
 """
@@ -51,7 +51,7 @@ STORY_SEND_SPACING_SECONDS = 1.5
 STORY_REPEAT_HOURS = 48
 # Every layout keeps its call to action here, clear of Instagram's reply bar.
 # The call to action ends 260px above the bottom, clear of Instagram's
-# comment field.
+# reply field.
 CTA_TOP = 1490
 CTA_HEIGHT = 170
 
@@ -460,7 +460,7 @@ def story_titles(listing):
 def short_code(listing):
     """
     The listing's sequence number: the first digits of its unit code (22537
-    -> 225), unique per listing and short enough to comment.
+    -> 225), unique per listing and short enough to type.
     """
 
     sequence = listing.get("internal_sequence")
@@ -471,7 +471,7 @@ def short_code(listing):
 
 def call_to_action(listing):
     code = persian_digits(short_code(listing))
-    return f"برای دریافت قیمت و مشخصات، عدد {code} رو کامنت کنید"
+    return f"برای دریافت قیمت و مشخصات، عدد {code} رو ارسال کنید"
 
 
 # ---------------------------------------------------------------- copy
@@ -526,7 +526,7 @@ def openai_caption(listing, rng=random):
 You write the Instagram caption for a property story of a real-estate channel
 in Tabriz, in Persian. Use ONLY the facts given; never invent features,
 addresses, phone numbers, agency or person names. Never mention the price or
-any amount of money: the viewer must comment the code to get the price.
+any amount of money: the viewer must send the code (a story reply) to get the price.
 Do not open with a slogan or catchphrase; start directly with the home's
 facts. Write 3 to 5 short Persian lines (emoji allowed), then the call to
 action exactly as given, then 5 to 7 relevant Persian hashtags on one line.
@@ -964,7 +964,7 @@ def _info_block(canvas, info, band_box, radius=0, style="solid"):
 
 
 def _cta(canvas, listing, fill=(RED_DEEP, RED), text_fill=TEXT, code_fill=TEXT, code_text=RED_DEEP):
-    """«برای دریافت قیمت و مشخصات» over «عدد [۲۲۹] رو کامنت کنید», the code boxed."""
+    """«برای دریافت قیمت و مشخصات» over «عدد [۲۲۹] رو ارسال کنید», the code boxed."""
 
     left, top, right, bottom = MARGIN, CTA_TOP, canvas.width - MARGIN, CTA_TOP + CTA_HEIGHT
     _rounded(canvas, (left, top, right, bottom), fill, 48)
@@ -974,7 +974,7 @@ def _cta(canvas, listing, fill=(RED_DEEP, RED), text_fill=TEXT, code_fill=TEXT, 
 
     font = _font(FONT_BLACK, 56)
     code = persian_digits(short_code(listing))
-    before, after = "عدد", "رو کامنت کنید"
+    before, after = "عدد", "رو ارسال کنید"
     widths = [font.getlength(_shape(before)), font.getlength(_shape(code)) + 44,
               font.getlength(_shape(after))]
     gap = 18
@@ -989,7 +989,7 @@ def _cta(canvas, listing, fill=(RED_DEEP, RED), text_fill=TEXT, code_fill=TEXT, 
 
 
 def _chevrons(canvas, top):
-    """Arrows pointing at Instagram's comment field under the story."""
+    """Arrows pointing at Instagram's reply field under the story."""
 
     layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
@@ -1002,7 +1002,7 @@ def _chevrons(canvas, top):
 
 
 def _code_badge(canvas, center, radius, listing):
-    """A red disc asking viewers to comment the short code."""
+    """A red disc asking viewers to send the short code."""
 
     box = (center[0] - radius, center[1] - radius, center[0] + radius, center[1] + radius)
     mask = Image.new("L", (2 * radius, 2 * radius), 0)
@@ -1011,7 +1011,7 @@ def _code_badge(canvas, center, radius, listing):
     canvas.paste(_gradient(mask.size, RED_DEEP, RED), box[:2], mask)
     draw = ImageDraw.Draw(canvas)
     draw.ellipse((box[0] + 10, box[1] + 10, box[2] - 10, box[3] - 10), outline=TEXT, width=4)
-    _draw_centered(draw, "کامنت کن", _font(FONT_MEDIUM, 30),
+    _draw_centered(draw, "ارسال کن", _font(FONT_MEDIUM, 30),
                    (box[0], center[1] - radius * 0.62, box[2], center[1] - radius * 0.12), TEXT)
     _draw_centered(draw, persian_digits(short_code(listing)), _font(FONT_BLACK, int(radius * 0.72)),
                    (box[0], center[1] - radius * 0.1, box[2], center[1] + radius * 0.62), TEXT)
@@ -1177,7 +1177,7 @@ def _price_prompt(count):
         "بازهٔ قیمت رو بنویسید، مثلاً:\n"
         "«۱۰ تا ۱۲ میلیارد» یا «زیر ۸» یا «بالای ۲۰»\n\n"
         "یا «💰 همه قیمت‌ها» رو بزنید.\n"
-        "قیمت روی استوری نمیاد تا مخاطب کد رو کامنت کنه."
+        "قیمت روی استوری نمیاد تا مخاطب کد رو برامون ارسال کنه."
     )
 
 
