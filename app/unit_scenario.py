@@ -1,11 +1,13 @@
 """
-Settings › «🎬 سناریو ریلز»: the owner sends a file code and gets a
-30-second Reels script for that listing, to record himself on camera in a
-friendly, casual voice: the hook, timed scenes (what to film, what to say,
-the text on screen), the closing call to action, a cover title, the
-caption and recording tips.
+Settings › «🎬 سناریو ریلز»: the owner sends a file code and gets what to
+say in a Reels video about that listing, recorded himself on camera: two
+strong hooks to choose from, a short flowing spoken text and the closing
+line with the short code, plus a cover title and caption. Under 30
+seconds, shorter when the facts are few; never an advert, never a
+robotic list of specs. The pictures and scenes are his: most listings
+have no video, so the script has none.
 
-Like the stories, the script uses only the listing's own facts and never
+Like the stories, the text uses only the listing's own facts and never
 its price: viewers send the code to get it.
 """
 
@@ -27,8 +29,10 @@ from instagram_story import (
     listing_by_id,
     persian_digits,
     short_code,
+    story_amenities,
     story_facts,
     story_region,
+    story_stats,
     story_titles,
 )
 
@@ -38,106 +42,128 @@ UNIT_SCENARIO_STATE = "unit_scenario_code"
 SCENARIO_SECONDS = 30
 TELEGRAM_TEXT_LIMIT = 4000
 
-ANGLES = (
-    "از نور و دلبازی خونه شروع کن",
-    "از حس زندگی کردن توی این خونه شروع کن",
-    "از یه سؤال از بیننده شروع کن",
-    "از منطقه و دسترسی‌هاش شروع کن",
-    "از مهم‌ترین امکان خونه شروع کن",
+# A different way into the hook each time, for «🔄 یه سناریوی دیگه».
+HOOK_STYLES = (
+    "a question about a real need that this home's facts answer",
+    "the single most useful or surprising fact, said plainly",
+    "like telling a friend about a home you just saw",
+    "an honest one-line opinion about who this home suits",
 )
 
 INSTRUCTIONS = f"""
-You write a {SCENARIO_SECONDS}-second Instagram Reels script in Persian for a
-real-estate agent in Tabriz who talks to the camera himself. Tone: warm,
-friendly and casual (صمیمی و خودمونی), like talking to a friend; short
-natural spoken sentences, no formal or literary words.
+You write what a real-estate agent in Tabriz says to the camera in an
+Instagram Reels video about one home, in spoken Persian (محاوره‌ای), warm and
+casual, like telling a friend about a home he just saw. He films the pictures
+himself: write NO scenes, shots, camera directions or on-screen text.
 
-Use ONLY the facts given. Never invent features, rooms, views or places.
-Never mention the price or any amount of money: viewers must send the code
-to get it. Never write phone numbers, other agencies, channel names or links.
+It must NOT sound like an advert or a robot:
+- No sales clichés: فرصت استثنایی، فرصت طلایی، از دست ندید، بی‌نظیر، رویایی،
+  فوق‌العاده، لاکچری، همین حالا، عجله کنید، تکرارنشدنی.
+- Do not read out a list of specs. Pick the 3 or 4 facts that matter most and
+  weave them into natural sentences. Never say things like «مشخصاتش رو مرور
+  کنیم»، «اینا هم از مشخصاتشه»، «همه‌ی این مشخصات».
+- Name the neighbourhood at most once in the spoken text.
+- A short honest opinion that follows from the facts is fine (who it suits).
+
+The hook must stop the scroll in the first 3 seconds: concrete, curious,
+specific to this home; never a bland «دنبال خونه‌ای؟».
+
+Use ONLY the facts given; never invent features, rooms, views or places.
+Never mention the price or any amount of money: viewers send the code to get
+it. Never write phone numbers, other agencies, channel names or links.
+
+Everything spoken (hook + text + closing line) must take under
+{SCENARIO_SECONDS} seconds: about 45 to 65 Persian words in all. Fewer facts
+means a shorter text; never pad.
 
 Write plain text for Telegram (no markdown symbols like * or #, except the
 hashtags), exactly in this order:
 
-🎣 هوک (۰ تا ۳ ثانیه)
-🗣 one spoken line that stops the scroll
-🔤 متن روی تصویر: up to 5 words
+🎣 هوک (۳ ثانیهٔ اول)
+۱) one hook
+۲) another hook, in a different style
 
-🎬 صحنه‌ها
-4 or 5 scenes with Persian time ranges that end at ۲۷ ثانیه; for each:
-⏱ the time range
-📍 what to film (a concrete shot of this home)
-🗣 what to say
-🔤 text on screen (up to 5 words)
+🗣 متن
+the spoken text, one or two short paragraphs
 
-📣 پایان (۲۷ تا ۳۰ ثانیه)
-🗣 the call to action, word for word as given
+📣 آخرش بگو
+the closing line, word for word as given
 
 📝 تیتر کاور: up to 5 words
-✍️ کپشن: 3 or 4 short lines, then the call to action, then 5 to 7 Persian hashtags
-💡 نکته‌های ضبط: 2 or 3 short tips (vertical video, light, steady movement)
+✍️ کپشن:
+2 or 3 short natural lines (no clichés), the closing line, then 4 to 6 Persian hashtags
 
-All spoken lines together must fit in {SCENARIO_SECONDS} seconds (about 70 to 80 words).
+Style example only (never copy its facts): for «ولیعصر، ۸۵ متر، ۲ خواب،
+طبقه ۳، ساخت ۱۴۰۰، آسانسور، پارکینگ» a good text is: «۸۵ متره با دو تا خواب،
+ساخت ۱۴۰۰. طبقهٔ سومه ولی آسانسور داره، پارکینگم داره؛ برای یه زوج جوون یا یه
+خانوادهٔ کوچیک دقیقاً همون چیزیه که لازمه.»
+
 Return ONLY the script.
 """.strip()
 
 
 def call_to_action(listing):
     code = persian_digits(short_code(listing))
-    return f"برای قیمت و مشخصات، عدد {code} رو کامنت کنید یا دایرکت بدید"
+    return f"اگه قیمتش رو می‌خوای، عدد {code} رو کامنت کن یا دایرکت بده"
 
 
 def scenario_header(listing):
     tag, headline = story_titles(listing)
     code = persian_digits(listing.get("unit_code") or short_code(listing))
-    return f"🎬 سناریو ریلز {persian_digits(SCENARIO_SECONDS)} ثانیه‌ای | کد {code}\n🏡 {headline} | {tag}"
+    return (
+        f"🎬 متن ریلز (زیر {persian_digits(SCENARIO_SECONDS)} ثانیه) | کد {code}\n"
+        f"🏡 {headline} | {tag}"
+    )
+
+
+def _spoken_details(listing):
+    """«طبقه ۱ از ۴، ساخت ۱۳۹۲؛ آسانسور و پارکینگ هم داره.» or None."""
+
+    stats = [text for _value, _label, text in story_stats(listing)][:2]
+    amenities = story_amenities(listing)[:2]
+    parts = []
+    if stats:
+        parts.append("، ".join(stats))
+    if amenities:
+        parts.append(" و ".join(amenities) + " هم داره")
+    return "؛ ".join(parts) + "." if parts else None
 
 
 def fallback_scenario(listing):
     """A plain script from the listing's facts when OpenAI is unavailable."""
 
-    tag, headline = story_titles(listing)
+    _tag, headline = story_titles(listing)
     region = story_region(listing) or "تبریز"
-    facts = story_facts(listing)
-    extras = [fact for fact in facts if fact not in (region,) and fact not in headline][:4]
-    extra_line = "، ".join(extras) if extras else "یه خونهٔ تمیز و آماده"
+    details = _spoken_details(listing)
     cta = call_to_action(listing)
+    area = listing.get("area_m2")
+    area = persian_digits(int(float(area))) if area else None
+    bedrooms = listing.get("bedrooms")
+    bedrooms = persian_digits(bedrooms) if bedrooms else None
+    home = "یه خونهٔ" + (f" {area} متری" if area else "") + (f" {bedrooms}خوابه" if bedrooms else "")
+    if area and bedrooms:
+        opening = f"{area} متره با {bedrooms} تا خواب، توی {region}."
+    elif area:
+        opening = f"{area} متره، توی {region}."
+    else:
+        opening = f"توی {region}ه."
     return "\n".join([
-        "🎣 هوک (۰ تا ۳ ثانیه)",
-        f"🗣 «یه خونهٔ {headline} توی {region} پیدا کردم که باید ببینید!»",
-        f"🔤 متن روی تصویر: {headline} در {region}",
+        "🎣 هوک (۳ ثانیهٔ اول)",
+        f"۱) «امروز {home} دیدم؛ بذار بگم چرا ارزش دیدن داره.»",
+        f"۲) «توی {region} {home} پیدا کردم که حیفم اومد نشونت ندم.»",
         "",
-        "🎬 صحنه‌ها",
-        "⏱ ۳ تا ۸ ثانیه",
-        "📍 از در ورودی وارد شو و آروم کل پذیرایی رو نشون بده",
-        "🗣 «ببینید چه فضای دلبازی داره.»",
-        f"🔤 {headline}",
+        "🗣 متن",
+        f"«{opening}" + (f" {details}" if details else "") + "»",
         "",
-        "⏱ ۸ تا ۱۵ ثانیه",
-        "📍 آشپزخونه و نور پنجره‌ها",
-        f"🗣 «{extra_line}.»",
-        "🔤 امکانات کامل",
+        "📣 آخرش بگو",
+        f"«{cta}»",
         "",
-        "⏱ ۱۵ تا ۲۲ ثانیه",
-        "📍 اتاق‌خواب‌ها، یکی‌یکی",
-        "🗣 «اتاق‌ها هم جادار و آماده‌ن.»",
-        "🔤 آمادهٔ سکونت",
-        "",
-        "⏱ ۲۲ تا ۲۷ ثانیه",
-        "📍 خودت جلوی دوربین، کنار پنجره",
-        f"🗣 «موقعیتش هم توی {region}ه؛ دسترسی عالی.»",
-        f"🔤 {tag}",
-        "",
-        "📣 پایان (۲۷ تا ۳۰ ثانیه)",
-        f"🗣 «{cta}»",
-        "",
-        f"📝 تیتر کاور: {headline} در {region}",
-        f"✍️ کپشن: یه خونهٔ {headline} توی {region} 🏡",
-        f"{extra_line}",
+        f"📝 تیتر کاور: {headline} | {region}",
+        "✍️ کپشن:",
+        f"{headline} توی {region}",
+        *([details] if details else []),
         cta,
-        "#املاک_تبریز #خرید_آپارتمان #تبریز #خانه_رویایی",
-        "",
-        "💡 نکته‌های ضبط: گوشی رو عمودی بگیر، روز و با نور طبیعی فیلم بگیر، آروم و بدون تکون راه برو.",
+        "#املاک_تبریز #خرید_آپارتمان #تبریز",
     ])
 
 
@@ -166,8 +192,8 @@ def write_scenario(listing, rng=random):
                 "facts": story_facts(listing),
                 "region": story_region(listing),
                 "headline": headline,
-                "angle": rng.choice(ANGLES),
-                "call_to_action": call_to_action(listing),
+                "first_hook_style": rng.choice(HOOK_STYLES),
+                "closing_line": call_to_action(listing),
             },
             ensure_ascii=False,
         ),
@@ -193,7 +219,7 @@ def write_scenario(listing, rng=random):
     if not script:
         return fallback
     if short_code(listing) not in script.translate(LATIN_DIGITS):
-        script = f"{script}\n\n📣 {call_to_action(listing)}"
+        script = f"{script}\n\n📣 آخرش بگو\n«{call_to_action(listing)}»"
     return script
 
 
@@ -220,8 +246,9 @@ def code_prompt():
     return (
         "🎬 سناریو ریلز\n\n"
         "کد فایل رو بفرستید (مثلاً ۳۵۱۳ یا کد کوتاهش ۳۵۱).\n"
-        f"یه سناریوی {persian_digits(SCENARIO_SECONDS)} ثانیه‌ای صمیمی می‌نویسم که خودتون "
-        "جلوی دوربین بگید: هوک، صحنه‌به‌صحنه، متن روی تصویر، تیتر و کپشن."
+        f"یه متن روون و خودمونی زیر {persian_digits(SCENARIO_SECONDS)} ثانیه می‌نویسم که خودتون "
+        "جلوی دوربین بگید: دو تا هوک قوی، متن اصلی و جملهٔ آخر، با تیتر کاور و کپشن. "
+        "تصویرها و صحنه‌ها با خودتون."
     )
 
 
