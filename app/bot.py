@@ -68,6 +68,12 @@ from instagram_story import (
     handle_instagram_story_text,
     story_topic,
 )
+from unit_scenario import (
+    UNIT_SCENARIO_ACTION,
+    UNIT_SCENARIO_STATE,
+    handle_unit_scenario_button,
+    handle_unit_scenario_text,
+)
 from daily_backup import (
     DB_BACKUP_ACTION,
     handle_backup_button,
@@ -10541,6 +10547,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if state == UNIT_SCENARIO_STATE:
+        await handle_unit_scenario_text(
+            update,
+            context,
+            allowed=check_action_access(session, UNIT_SCENARIO_ACTION),
+        )
+        return
+
     # CHANNEL_FILE_EDITOR_TEXT_ROUTER_V1
     if await handle_file_editor_text(
         update,
@@ -14087,6 +14101,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # A price typed for the PDF counts only while its menu is open.
     if not action.startswith("export_properties_pdf"):
         context.user_data.pop("pdf_price_custom", None)
+    # Likewise a file code typed for a Reels scenario.
+    if (
+        not action.startswith(UNIT_SCENARIO_ACTION)
+        and context.user_data.get("state") == UNIT_SCENARIO_STATE
+    ):
+        context.user_data.pop("state", None)
 
     if action == "customer_campaigns":
         await query.edit_message_text(
@@ -14159,6 +14179,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == INSTAGRAM_STORY_ACTION or action.startswith(f"{INSTAGRAM_STORY_ACTION}_"):
         await handle_instagram_story_button(query, context)
+        return
+
+    if action == UNIT_SCENARIO_ACTION or action.startswith(f"{UNIT_SCENARIO_ACTION}_"):
+        await handle_unit_scenario_button(query, context)
         return
 
     if action == DB_BACKUP_ACTION or action.startswith(f"{DB_BACKUP_ACTION}_"):
