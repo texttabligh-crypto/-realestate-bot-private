@@ -55,5 +55,24 @@ chmod 440 /etc/sudoers.d/realestate-diagnose && visudo -cf /etc/sudoers.d/reales
 نمی‌دهد و جدول‌های مشتری را نمی‌خواند. بعد از هر تغییر در اسکریپت، دستور
 `install` بالا را دوباره با root اجرا کنید تا نسخهٔ نصب‌شده به‌روز شود.
 
+## بکاپ دیتابیس
+
+هر شب بعد از ساعت ۰۳:۳۰ (به وقت تهران) ربات یک نسخهٔ کامل از دیتابیس را با
+`pg_dump` خود کانتینر Postgres می‌سازد و برای همهٔ مالک‌ها در تلگرام می‌فرستد
+(تنظیمات › «💾 بکاپ دیتابیس»؛ دکمهٔ «📤 همین الان بکاپ بگیر» هم همان‌جاست).
+فایل `shahfile-backup-<تاریخ>.sql.gz` یک SQL فشرده با `--clean --if-exists` است.
+
+برگرداندن روی سرور (دیتابیس قبلی جایگزین می‌شود):
+
+```bash
+cd /opt/realestate-bot
+docker compose up -d postgres
+gunzip -c shahfile-backup-1405-07-26-0330.sql.gz \
+  | docker exec -i realestate_postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+docker compose up -d
+```
+
+روی سرور تازه، اول مخزن و `.env` را مثل قبل آماده کنید، بعد همین دستورها را بزنید.
+
 تنظیمات واقعی فقط در `.env` سرور نگهداری می‌شوند. برای فهرست متغیرهای لازم،
 از `.env.example` استفاده کنید.

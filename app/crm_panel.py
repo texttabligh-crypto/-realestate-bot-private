@@ -160,7 +160,7 @@ def has_permission(session, key):
 def _required_permission(action):
     if action in ("home",):
         return None
-    if action in ("users", "settings_users", "reset"):
+    if action in ("users", "settings_users", "reset") or action.startswith("db_backup"):
         return "OWNER_ONLY"
     if action.startswith("crm_"):
         if action.startswith("crm_visit"):
@@ -6521,9 +6521,13 @@ def build_settings_menu(session, legacy_keyboard):
     if is_owner(session):
         hub_rows.append([
             InlineKeyboardButton(
+                "💾 بکاپ دیتابیس",
+                callback_data="db_backup",
+            ),
+            InlineKeyboardButton(
                 "♻️ ریست",
                 callback_data="reset",
-            )
+            ),
         ])
 
     return InlineKeyboardMarkup(
