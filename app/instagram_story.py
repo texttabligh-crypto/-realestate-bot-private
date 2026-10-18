@@ -255,54 +255,100 @@ def random_story_listings(count, price_min=None, price_max=None):
                 (*params, STORY_REPEAT_HOURS, int(count) * 2),
             )
             listings = [dict(zip(_LISTING_KEYS, row)) for row in cur.fetchall()]
-            if not listings:
-                return []
+            _attach_photos_and_details(cur, listings)
+    return listings
 
-            cur.execute(
-                """
-                SELECT property_id, telegram_file_id
-                FROM (
-                    SELECT
-                        property_id,
-                        telegram_file_id,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY property_id
-                            ORDER BY position, id
-                        ) AS rank
-                    FROM property_media
-                    WHERE property_id = ANY(%s)
-                      AND media_type = 'PHOTO'
-                      AND telegram_file_id IS NOT NULL
-                ) ranked
-                WHERE rank <= %s
-                ORDER BY property_id, rank
-                """,
-                ([item["id"] for item in listings], STORY_PHOTO_LIMIT),
-            )
-            photos = {}
-            for property_id, file_id in cur.fetchall():
-                photos.setdefault(property_id, []).append(file_id)
 
-            # The parsed details the channel post already shows.
-            cur.execute(
-                """
-                SELECT property_id, attribute_key, attribute_value
-                FROM property_attributes
-                WHERE property_id = ANY(%s)
-                  AND is_visible = TRUE
-                  AND COALESCE(attribute_value, '') <> ''
-                ORDER BY property_id, display_order, id
-                """,
-                ([item["id"] for item in listings],),
-            )
-            details = {}
-            for property_id, key, value in cur.fetchall():
-                details.setdefault(property_id, []).append((key, value))
+def _attach_photos_and_details(cur, listings):
+    """Each listing's first photos and the parsed details its post shows."""
+
+    if not listings:
+        return
+    cur.execute(
+        """
+        SELECT property_id, telegram_file_id
+        FROM (
+            SELECT
+                property_id,
+                telegram_file_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY property_id
+                    ORDER BY position, id
+                ) AS rank
+            FROM property_media
+            WHERE property_id = ANY(%s)
+              AND media_type = 'PHOTO'
+              AND telegram_file_id IS NOT NULL
+        ) ranked
+        WHERE rank <= %s
+        ORDER BY property_id, rank
+        """,
+        ([item["id"] for item in listings], STORY_PHOTO_LIMIT),
+    )
+    photos = {}
+    for property_id, file_id in cur.fetchall():
+        photos.setdefault(property_id, []).append(file_id)
+
+    cur.execute(
+        """
+        SELECT property_id, attribute_key, attribute_value
+        FROM property_attributes
+        WHERE property_id = ANY(%s)
+          AND is_visible = TRUE
+          AND COALESCE(attribute_value, '') <> ''
+        ORDER BY property_id, display_order, id
+        """,
+        ([item["id"] for item in listings],),
+    )
+    details = {}
+    for property_id, key, value in cur.fetchall():
+        details.setdefault(property_id, []).append((key, value))
 
     for listing in listings:
         listing["photo_file_ids"] = photos.get(listing["id"], [])
         listing["attributes"] = details.get(listing["id"], [])
-    return listings
+
+
+def _load_listing(where, params):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {", ".join(f"p.{key}" for key in _LISTING_KEYS)}
+                FROM properties p
+                WHERE {where}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM property_trash pt WHERE pt.property_id = p.id
+                  )
+                ORDER BY (p.status = 'ACTIVE') DESC, p.id DESC
+                LIMIT 1
+                """,
+                params,
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            listing = dict(zip(_LISTING_KEYS, row))
+            _attach_photos_and_details(cur, [listing])
+    return listing
+
+
+def listing_by_code(code):
+    """
+    The listing with this unit code or short code («۳۵۱۳» or «۳۵۱»), live
+    ones and full codes first, with its photos and details; None when none.
+    """
+
+    code = str(code or "").translate(LATIN_DIGITS).strip()
+    if not code.isdigit():
+        return None
+    return _load_listing("p.unit_code = %s", (code,)) or _load_listing(
+        "p.internal_sequence::text = %s", (code,)
+    )
+
+
+def listing_by_id(property_id):
+    return _load_listing("p.id = %s", (int(property_id),))
 
 
 def parse_price_range(text):
