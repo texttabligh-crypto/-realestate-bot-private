@@ -112,7 +112,7 @@ class WatchTickTest(unittest.TestCase):
             "ChannelPostTooOldToDelete": TooOld,
             "SOURCE_DELETE_WATCH_BATCH_SIZE": 25,
             "get_source_delete_watch_rows": lambda limit: [(254, 295, 7102, None, "royalmelkktbz")],
-            "source_public_post_exists": lambda username, message_id: False,
+            "fetch_source_public_post": lambda username, message_id: (False, None),
             "touch_property_source_check": lambda row_id: calls.append(("touch", row_id)),
             "cancel_property_queues_for_deleted_source": lambda pid, row_id: calls.append(("cancel", pid)),
             "should_remove_published_property_after_source_delete": lambda pid: True,
