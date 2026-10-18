@@ -1,4 +1,5 @@
 import asyncio
+import types
 import urllib.request
 import urllib.error
 import re
@@ -19,6 +20,7 @@ from telegram.error import BadRequest, RetryAfter, TimedOut
 from composite_search import composite_text_predicates
 from property_filter import classify_property
 from property_parser import is_direction_only_detail, is_feature_line_district, is_headline_detail, is_promotional_attribute, normalize_text, parse_property, parse_dynamic_attributes, parse_rule_attributes, parse_source_unit_code, split_listing_blocks
+from source_public_post import public_post_text
 from publisher import get_property_for_publish, build_publish_text, publish_property, get_property_media, republish_property, get_destination_channel, build_channel_post_url
 
 from scheduler import (
@@ -7203,7 +7205,9 @@ def channel_type_keyboard():
 
 
 SOURCE_DELETE_WATCH_INTERVAL_SECONDS = 300
-SOURCE_DELETE_WATCH_BATCH_SIZE = 25
+SOURCE_DELETE_WATCH_BATCH_SIZE = 40
+# Source edits seen on public pages applied in one tick, at most.
+SOURCE_PUBLIC_EDIT_SYNC_LIMIT = 3
 
 
 def get_source_delete_watch_rows(limit=25):
@@ -7344,21 +7348,22 @@ def should_remove_published_property_after_source_delete(property_id):
     )
 
 
-def source_public_post_exists(
+def fetch_source_public_post(
     username,
     message_id,
 ):
     """
-    Returns:
+    (exists, text) of a source post from its public embed page:
         True  -> post definitely appears to exist
         False -> Telegram page explicitly says post is missing
         None  -> network/temporary/unknown condition
+    text is the post's text when it exists, else None.
     """
 
     username = str(username or "").strip().lstrip("@")
 
     if not username or not message_id:
-        return None
+        return None, None
 
     url = (
         f"https://t.me/{username}/"
@@ -7380,19 +7385,21 @@ def source_public_post_exists(
             request,
             timeout=15,
         ) as response:
-            body = response.read().decode(
+            page = response.read().decode(
                 "utf-8",
                 errors="ignore",
-            ).lower()
+            )
 
     except urllib.error.HTTPError as exc:
         if exc.code in (404, 410):
-            return False
+            return False, None
 
-        return None
+        return None, None
 
     except Exception:
-        return None
+        return None, None
+
+    body = page.lower()
 
     missing_markers = (
         "post not found",
@@ -7405,7 +7412,7 @@ def source_public_post_exists(
         marker in body
         for marker in missing_markers
     ):
-        return False
+        return False, None
 
     # Telegram embed pages for existing channel posts
     # normally contain this widget container.
@@ -7419,9 +7426,110 @@ def source_public_post_exists(
         marker in body
         for marker in existing_markers
     ):
-        return True
+        return True, public_post_text(page)
 
-    return None
+    return None, None
+
+
+def source_public_post_exists(
+    username,
+    message_id,
+):
+    return fetch_source_public_post(username, message_id)[0]
+
+
+def get_source_sync_row(property_source_id):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    c.telegram_channel_id,
+                    ps.source_message_id,
+                    ps.source_price_toman,
+                    ps.is_active,
+                    p.status
+                FROM property_sources ps
+                JOIN channels c
+                  ON c.id = ps.source_channel_id
+                JOIN properties p
+                  ON p.id = ps.property_id
+                WHERE ps.id = %s
+                """,
+                (property_source_id,),
+            )
+            return cur.fetchone()
+
+
+async def sync_source_public_edit(
+    bot,
+    property_source_id,
+    public_text,
+):
+    """
+    Apply a source edit seen only on the post's public page (the bot is not
+    an admin there, or missed the edit): a new price or «فروش رفت». Applied
+    like an edit Telegram delivered. True when the listing was updated.
+    """
+
+    row = await asyncio.to_thread(
+        get_source_sync_row,
+        property_source_id,
+    )
+
+    if not row:
+        return False
+
+    channel_id, message_id, stored_price, is_active, status = row
+
+    if not is_active or not message_id:
+        return False
+
+    # A pinned multi-listing post: only this unit's own block counts.
+    text = public_text
+    blocks = split_listing_blocks(text)
+
+    if blocks:
+        code = get_source_unit_code_for_message(channel_id, message_id)
+        text = next(
+            (block for block_code, block in blocks if block_code == code),
+            None,
+        )
+
+        if text is None:
+            return False
+
+    sold = status == "ACTIVE" and source_text_is_sold(text)
+    price = parse_property(text).get("current_price_toman")
+
+    if not sold and (
+        price is None
+        or stored_price is None
+        or int(price) == int(stored_price)
+    ):
+        return False
+
+    logging.info(
+        "SOURCE edit seen on public page: property_source_id=%s "
+        "message=%s old_price=%s new_price=%s sold=%s",
+        property_source_id,
+        message_id,
+        stored_price,
+        price,
+        sold,
+    )
+
+    post = types.SimpleNamespace(
+        caption=None,
+        text=public_text,
+        chat=types.SimpleNamespace(id=int(channel_id)),
+        message_id=int(message_id),
+    )
+
+    return await sync_edited_source_post(
+        post,
+        types.SimpleNamespace(bot=bot),
+    )
 
 
 def cancel_property_queues_for_deleted_source(
@@ -7495,6 +7603,7 @@ async def run_source_deleted_posts_watch_tick(
     checked = 0
     missing = 0
     unknown = 0
+    edits_synced = 0
     destination_deleted = 0
     manual_removals = []
 
@@ -7506,8 +7615,8 @@ async def run_source_deleted_posts_watch_tick(
         username,
     ) in rows:
 
-        exists = await asyncio.to_thread(
-            source_public_post_exists,
+        exists, public_text = await asyncio.to_thread(
+            fetch_source_public_post,
             username,
             source_message_id,
         )
@@ -7515,6 +7624,21 @@ async def run_source_deleted_posts_watch_tick(
         if exists is True:
             touch_property_source_check(property_source_id)
             checked += 1
+
+            if public_text and edits_synced < SOURCE_PUBLIC_EDIT_SYNC_LIMIT:
+                try:
+                    if await sync_source_public_edit(
+                        application.bot,
+                        property_source_id,
+                        public_text,
+                    ):
+                        edits_synced += 1
+                except Exception:
+                    logging.exception(
+                        "SOURCE public edit sync failed: property_id=%s",
+                        property_id,
+                    )
+
             continue
 
         if exists is None:
@@ -7601,11 +7725,12 @@ async def run_source_deleted_posts_watch_tick(
 
     logging.info(
         "SOURCE deleted-post watcher completed: "
-        "checked=%s missing=%s unknown=%s destination_deleted=%s "
-        "manual_removal=%s",
+        "checked=%s missing=%s unknown=%s edits_synced=%s "
+        "destination_deleted=%s manual_removal=%s",
         checked,
         missing,
         unknown,
+        edits_synced,
         destination_deleted,
         len(manual_removals),
     )
