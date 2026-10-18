@@ -1,10 +1,11 @@
-"""Settings › «🎬 سناریو ریلز»: a 30-second Reels script for a file code.
+"""Settings › «🎬 سناریو ریلز»: what to say in a Reels video about a file code.
 
-The owner records himself in a friendly voice, so the script gives the hook,
-timed scenes (what to film, what to say, the text on screen), the call to
-action with the short code, a cover title, the caption and recording tips.
-Only the listing's own facts are used and never its price. Others get the
-button only when the owner grants «🎬 نوشتن سناریو ریلز».
+The owner records himself and films the pictures himself (most listings have
+no video), so the script is only words: two strong hooks, a short flowing
+spoken text, the closing line with the short code, a cover title and a
+caption. Under 30 seconds, never an advert, never a robotic list of specs, no
+scenes. Only the listing's own facts are used and never its price. Others
+get the button only when the owner grants «🎬 نوشتن سناریو ریلز».
 """
 import asyncio
 import io
@@ -61,11 +62,14 @@ class ScenarioTest(unittest.TestCase):
     def test_plain_script_without_openai(self):
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
             script = self.scenario.write_scenario(LISTING)
-        for heading in ("🎣 هوک (۰ تا ۳ ثانیه)", "🎬 صحنه‌ها", "📣 پایان (۲۷ تا ۳۰ ثانیه)",
-                        "📝 تیتر کاور:", "✍️ کپشن:", "💡 نکته‌های ضبط:"):
+        for heading in ("🎣 هوک (۳ ثانیهٔ اول)", "۱) ", "۲) ", "🗣 متن", "📣 آخرش بگو",
+                        "📝 تیتر کاور:", "✍️ کپشن:"):
             self.assertIn(heading, script)
-        self.assertIn("عدد ۲۷۳ رو کامنت کنید یا دایرکت بدید", script)
-        self.assertIn("ولیعصر جنوبی", script)
+        for scene_word in ("صحنه", "⏱", "📍", "متن روی تصویر", "نکته‌های ضبط"):
+            self.assertNotIn(scene_word, script)
+        self.assertIn("«اگه قیمتش رو می‌خوای، عدد ۲۷۳ رو کامنت کن یا دایرکت بده»", script)
+        self.assertIn("«۸۱ متره با ۲ تا خواب، توی ولیعصر جنوبی. طبقه ۵ از ۴، ساخت ۱۳۹۰؛ "
+                      "آسانسور و انباری هم داره.»", script)
         self.assertIsNone(PRICE_WORDS.search(script))
 
     def test_openai_script_keeps_price_out_and_the_code_in(self):
@@ -80,14 +84,19 @@ class ScenarioTest(unittest.TestCase):
             script = self.scenario.write_scenario(LISTING, rng=__import__("random").Random(1))
         self.assertIn("این خونه رو از دست ندید!", script)
         self.assertNotIn("میلیارد", script)
-        self.assertTrue(script.endswith("📣 برای قیمت و مشخصات، عدد ۲۷۳ رو کامنت کنید یا دایرکت بدید"))
+        self.assertTrue(script.endswith("📣 آخرش بگو\n«اگه قیمتش رو می‌خوای، عدد ۲۷۳ رو کامنت کن یا دایرکت بده»"))
         payload, timeout = requests[0]
         self.assertGreaterEqual(timeout, 60)
-        self.assertIn("Never mention the price", payload["instructions"])
-        self.assertIn("صمیمی و خودمونی", payload["instructions"])
-        self.assertIn("30-second", payload["instructions"])
+        instructions = payload["instructions"]
+        self.assertIn("Never mention the price", instructions)
+        self.assertIn("write NO scenes", instructions)
+        self.assertIn("It must NOT sound like an advert or a robot", instructions)
+        self.assertIn("از دست ندید", instructions)  # named as a cliché to avoid
+        self.assertIn("under\n30 seconds", instructions)
+        self.assertIn("never a bland «دنبال خونه‌ای؟»", instructions)
         facts = json.loads(payload["input"])
         self.assertEqual(facts["headline"], "۸۱ متر، ۲ خواب")
+        self.assertEqual(facts["closing_line"], "اگه قیمتش رو می‌خوای، عدد ۲۷۳ رو کامنت کن یا دایرکت بده")
         self.assertIsNone(PRICE_WORDS.search(payload["input"]))
 
     def test_openai_failure_falls_back(self):
@@ -100,7 +109,7 @@ class ScenarioTest(unittest.TestCase):
 
     def test_message_and_keyboard(self):
         text = self.scenario.scenario_message(LISTING, "x" * 5000)
-        self.assertTrue(text.startswith("🎬 سناریو ریلز ۳۰ ثانیه‌ای | کد ۲۷۳۱۰\n🏡 ۸۱ متر، ۲ خواب | منطقه: ولیعصر جنوبی"))
+        self.assertTrue(text.startswith("🎬 متن ریلز (زیر ۳۰ ثانیه) | کد ۲۷۳۱۰\n🏡 ۸۱ متر، ۲ خواب | منطقه: ولیعصر جنوبی"))
         self.assertLessEqual(len(text), 4000)
         rows = self.scenario.scenario_keyboard(LISTING)
         self.assertEqual([row[0].callback_data for row in rows],
@@ -150,6 +159,7 @@ class ScenarioTest(unittest.TestCase):
         asyncio.run(self.scenario.handle_unit_scenario_button(Query(), context))
         self.assertEqual(context.user_data, {"state": "unit_scenario_code"})
         self.assertIn("کد فایل رو بفرستید", edits[0])
+        self.assertIn("تصویرها و صحنه‌ها با خودتون", edits[0])
 
 
 @unittest.skipUnless(Image is not None and psycopg and DSN, "set PGTEST_DSN to a scratch PostgreSQL")
