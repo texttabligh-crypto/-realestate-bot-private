@@ -66,6 +66,11 @@ from instagram_story import (
     handle_instagram_story_text,
     story_topic,
 )
+from daily_backup import (
+    DB_BACKUP_ACTION,
+    handle_backup_button,
+    start_daily_backup_worker,
+)
 from channel_file_editor import (
     ensure_channel_file_editor_schema,
     handle_file_editor_button,
@@ -10200,6 +10205,7 @@ async def post_init(application):
     start_campaign_broadcast_worker(application)
     start_visit_reminder_worker(application)
     start_visit_notification_worker(application)
+    start_daily_backup_worker(application)
     async def delayed_search_watch():
         await asyncio.sleep(12)
         start_search_watch_worker(application)
@@ -14028,6 +14034,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == INSTAGRAM_STORY_ACTION or action.startswith(f"{INSTAGRAM_STORY_ACTION}_"):
         await handle_instagram_story_button(query, context)
+        return
+
+    if action == DB_BACKUP_ACTION or action.startswith(f"{DB_BACKUP_ACTION}_"):
+        await handle_backup_button(query, context, session)
         return
 
     # CHANNEL_FILE_EDITOR_BUTTON_ROUTER_V1
