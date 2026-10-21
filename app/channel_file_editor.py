@@ -863,8 +863,8 @@ def _execute_db_changes(cur, property_id, old_snapshot, new_snapshot, draft):
 
     if "details" in draft:
         cur.execute(
-            "DELETE FROM property_attributes WHERE property_id = %s AND attribute_key LIKE 'source_detail_%'",
-            (property_id,),
+            "DELETE FROM property_attributes WHERE property_id = %s AND starts_with(attribute_key, %s)",
+            (property_id, "source_detail_"),
         )
         lines = [x.strip() for x in str(draft["details"] or "").splitlines() if x.strip()]
         for index, line in enumerate(lines[:25]):
@@ -1468,3 +1468,4 @@ async def handle_file_editor_text(update, context, session, *, allowed):
         disable_web_page_preview=True,
     )
     return True
+

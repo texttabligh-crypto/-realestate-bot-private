@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, io, json, logging, os, re
+import asyncio, hashlib, io, json, logging, os, re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import psycopg
@@ -297,6 +297,14 @@ def _create_manual(data,user_id):
     with db_connect() as c,c.cursor() as cur:
         cur.execute("""INSERT INTO properties(property_type,district,address_text,area_m2,bedrooms,floor_text,total_floors,build_year,direction,has_parking,has_elevator,has_storage,current_price_toman,current_price_billion,price_hashtag,raw_text,status,neighborhood,units_per_floor,deed_text,installations_text,parking_text,storage_text,elevator_text,special_notes,source_kind,ingest_status,manual_created_by_user_id,manual_created_at,has_media) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ACTIVE',%s,%s,%s,%s,%s,%s,%s,%s,'MANUAL','MANUAL_READY',%s,NOW(),%s) RETURNING id""",(clean.get('property_type'),clean.get('district'),clean.get('address_text'),clean.get('area_m2'),clean.get('bedrooms'),clean.get('floor_text'),clean.get('total_floors'),clean.get('build_year'),clean.get('direction'),_bool_text(clean.get('parking_text')),_bool_text(clean.get('elevator_text')),_bool_text(clean.get('storage_text')),price,billion,hashtag,raw,clean.get('district'),clean.get('units_per_floor'),clean.get('deed_text'),clean.get('installations_text'),clean.get('parking_text'),clean.get('storage_text'),clean.get('elevator_text'),clean.get('special_notes'),user_id,bool(clean.get('photos')))); pid=cur.fetchone()[0]
         attrs=[('total_floors','تعداد کل طبقات',clean.get('total_floors'),40),('units_per_floor','تعداد واحد در طبقه',clean.get('units_per_floor'),41),('deed','سند',clean.get('deed_text'),70),('installations','نصبیات / امکانات',clean.get('installations_text'),80)]
+        # Free-text notes are public listing details, not just a private DB
+        # column. Use the same keys as the channel editor so they can be
+        # displayed, replaced and cleared there without duplicate copies.
+        for index, line in enumerate(str(clean.get('special_notes') or '').splitlines()):
+            line = line.strip()
+            if line:
+                key = 'source_detail_' + hashlib.sha1(line.encode('utf-8')).hexdigest()[:12]
+                attrs.append((key, 'جزئیات', line, 90 + index))
         for k,l,v,o in attrs:
             if v not in (None,''): cur.execute("INSERT INTO property_attributes(property_id,attribute_key,attribute_label,attribute_value,display_order,is_visible) VALUES(%s,%s,%s,%s,%s,TRUE) ON CONFLICT(property_id,attribute_key) DO UPDATE SET attribute_value=EXCLUDED.attribute_value,attribute_label=EXCLUDED.attribute_label,is_visible=TRUE,updated_at=NOW()",(pid,k,l,str(v),o))
         for pos,p in enumerate(clean.get('photos',[]),1): cur.execute("INSERT INTO property_media(property_id,telegram_file_id,telegram_file_unique_id,media_type,position) VALUES(%s,%s,%s,'PHOTO',%s) ON CONFLICT DO NOTHING",(pid,p['file_id'],p['unique_id'],pos))
@@ -837,3 +845,4 @@ async def error_handler(update, context):
         audit_event(uid,'SYSTEM_ERROR',entity_type='BOT',severity='ERROR',details={'error':str(context.error)[:3000]})
     except Exception:
         logging.exception('error audit failed')
+
