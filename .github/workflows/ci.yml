@@ -24,3 +24,6 @@ jobs:
           bash -n deploy/diagnose-realestate-bot
       - name: Run project smoke test
         run: python smoke_test.py
+      - name: Test manual listing details and editor SQL
+        run: python -m unittest test_manual_listing_details.py
+
