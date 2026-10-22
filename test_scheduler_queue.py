@@ -29,7 +29,7 @@ class QueueTest(unittest.TestCase):
             db.execute("INSERT INTO properties VALUES (?,'ACTIVE')",(i,))
             db.execute("INSERT INTO publish_queue VALUES (?,?,?,NULL,'2026-10-01',0)",(i,i,'PENDING_DUPLICATE' if i<=56 else 'READY'))
             if i<=56: db.execute("INSERT INTO duplicate_reviews VALUES (?,'PENDING')",(i,))
-        source=Path(__file__).parent.joinpath('app/scheduler.py').read_text()
+        source=Path(__file__).parent.joinpath('app/scheduler.py').read_text(encoding='utf-8')
         tree=ast.parse(source)
         node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='get_queue_candidates')
         ns={'db_connect':lambda:Connection(db)}

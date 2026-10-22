@@ -12,7 +12,7 @@ NOTE = "پیش فروش-تحویل ۱۲ ماهه-پرداخت ۵۰ درصد او
 
 
 def load_functions(filename, names, namespace):
-    tree = ast.parse((ROOT / filename).read_text())
+    tree = ast.parse((ROOT / filename).read_text(encoding="utf-8"))
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     exec(compile(ast.Module(body=nodes, type_ignores=[]), filename, "exec"), namespace)
     return namespace
@@ -94,7 +94,7 @@ class ManualDetailsTests(unittest.TestCase):
 
     def test_intake_details_reach_public_caption(self):
         # Test the base formatter, not its runtime DB-dependent wrapper.
-        tree = ast.parse((ROOT / "publisher.py").read_text())
+        tree = ast.parse((ROOT / "publisher.py").read_text(encoding="utf-8"))
         node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
                     and n.name == "build_publish_text")
         ns = dict(get_publish_settings=lambda: defaultdict(str),
