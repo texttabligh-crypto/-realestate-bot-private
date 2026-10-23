@@ -12,6 +12,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
+import central_channel as central
 import channel_tools as ct
 import db
 from formatter import fa, money
@@ -362,8 +363,10 @@ async def owner_callback(q,context,a):
         text=f"🧾 {s['tracking_code']}\nبنگاه: {s['brand_name']}\nمنطقه: {s['district']}\nآدرس: {s['address_text']}\nمتراژ: {s['area_m2']}\nمالک: {s['owner_name']}\nشماره خصوصی: {s['owner_phone']}{duplicate}"
         await q.edit_message_text(text,reply_markup=M([[B("✅ تأیید و صف مرکزی",callback_data=f"o_central_{sid}")],[B("❌ رد",callback_data=f"o_subreject_{sid}")],[B("⬅️ صف",callback_data="o_submissions")]])); return
     if a.startswith("o_central_"):
-        sid=int(a.rsplit('_',1)[1]); pid=db.push_to_central(sid,OWNER_ID)
-        await q.edit_message_text(f"✅ تأیید شد و فایل مرکزی #{pid} با اولویت Partner وارد صف شد.",reply_markup=M([[B("⬅️ صف",callback_data="o_submissions")]])); return
+        sid=int(a.rsplit('_',1)[1])
+        text=("✅ تأیید شد؛ فایل با عکس‌هایش به صف کانال مرکزی می‌رود." if central_queued(sid)
+              else "⚠️ فقط فایل فروشی با قیمت به کانال مرکزی می‌رود.")
+        await q.edit_message_text(text,reply_markup=M([[B("⬅️ صف",callback_data="o_submissions")]])); return
     if a.startswith("o_subreject_"):
         sid=int(a.rsplit('_',1)[1]); db.execute("UPDATE partner_submissions SET status='REJECTED',updated_at=NOW() WHERE id=%s",(sid,)); db.audit("SUBMISSION_REJECTED",OWNER_ID,None,"SUBMISSION",sid)
         await q.edit_message_text("فایل رد شد.",reply_markup=M([[B("⬅️ صف",callback_data="o_submissions")]])); return
@@ -438,9 +441,10 @@ async def property_callback(q,context,a,mem):
     if a=="pf_central":
         if not mem.get("can_request_central"):
             await q.answer("دسترسی ارسال به کانال مرکزی ندارید.",show_alert=True); return
-        sid=st.get('saved_submission_id'); db.execute("UPDATE partner_submissions SET status='SUBMITTED',updated_at=NOW() WHERE id=%s AND agency_id=%s",(sid,mem['agency_id']))
-        db.execute("INSERT INTO partner_publication_jobs(submission_id,target_type,status) VALUES(%s,'CENTRAL_CHANNEL','PENDING')",(sid,)); db.audit("CENTRAL_REVIEW_REQUESTED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid)
-        await q.edit_message_text("✅ فایل برای بررسی و انتشار در کانال مرکزی ارسال شد.",reply_markup=M([[B("⬅️ منو",callback_data="home")]])); return
+        sid=st.get('saved_submission_id')
+        text=("✅ فایل در صف کانال مرکزی است." if central_queued(sid)
+              else "⚠️ فقط فایل فروشی با قیمت به کانال مرکزی می‌رود.")
+        await q.edit_message_text(text,reply_markup=M([[B("⬅️ منو",callback_data="home")]])); return
     if a=="pf_done": context.user_data.clear(); await q.edit_message_text("فایل ذخیره شد.",reply_markup=home_keyboard(mem)); return
 
 
@@ -511,7 +515,10 @@ async def save_submission(q,context,mem):
         rows.append([B(f"⏰ نوبت بعدی کانال ({ct.when_label(slot[0])})",callback_data="pf_own_slot")])
     if own and ct.agency_bot(mem['agency_id']):
         auto="\n⏰ اگه انتخابی نکنید، چند دقیقهٔ دیگه خودکار توی نوبت کانال بنگاه قرار می‌گیره."
-    rows += [[B("🌐 ارسال برای کانال مرکزی",callback_data="pf_central")],[B("✅ فعلاً تمام",callback_data="pf_done")]]
+    if central.queue(sid):
+        db.audit("CENTRAL_QUEUED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid)
+        auto+="\n🌐 برای کانال مرکزی هم خودکار در صف انتشار قرار گرفت."
+    rows += [[B("✅ فعلاً تمام",callback_data="pf_done")]]
     warning=f"\n\n⚠️ مشابه فایل {duplicate['tracking_code']} تشخیص داده شد؛ مدیر مرکزی هنگام بررسی آن را می‌بیند." if duplicate else ""
     await q.edit_message_text(f"✅ فایل ثبت شد.\nکد پیگیری: {code}{warning}\n\nمقصد انتشار را انتخاب کنید:{auto}",reply_markup=M(rows))
 
@@ -525,7 +532,7 @@ async def publish_own(q,context,mem):
         ids=await ct.publish_submission(s,conn,[context.bot])
         ct.record_publication(sid,conn['id'],ids)
         db.audit("AGENCY_CHANNEL_PUBLISHED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid,{"message_id":ids[0]})
-        await q.edit_message_text("✅ با برند بنگاه در کانال خودتان منتشر شد.",reply_markup=M([[B("🌐 ارسال برای کانال مرکزی",callback_data="pf_central")],[B("⬅️ منو",callback_data="home")]]))
+        await q.edit_message_text("✅ با برند بنگاه در کانال خودتان منتشر شد.",reply_markup=M([[B("⬅️ منو",callback_data="home")]]))
     except Exception as exc:
         db.audit("AGENCY_PUBLISH_FAILED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid,{"error":str(exc)})
         await q.edit_message_text("❌ انتشار انجام نشد. دسترسی ادمین ربات به کانال و شناسه کانال را بررسی کنید.\n"+str(exc)[:500],reply_markup=M([[B("⬅️ اتصال‌ها",callback_data="p_connect")]]))
@@ -1281,10 +1288,11 @@ def confirm_submission_availability(submission_id):
         (submission_id,),
     )
     if row and row.get("central_property_id"):
-        db.execute(
-            "UPDATE properties SET status='ACTIVE',updated_at=NOW() WHERE id=%s",
+        if db.one(
+            "UPDATE properties SET status='ACTIVE',updated_at=NOW() WHERE id=%s AND status='INACTIVE' RETURNING id",
             (row["central_property_id"],),
-        )
+        ):
+            db.central_event(row["central_property_id"],"STATUS")
 
 
 async def availability_callback(q,context,a,mem):
@@ -1341,6 +1349,7 @@ async def availability_callback(q,context,a,mem):
             "UPDATE properties SET status='INACTIVE',updated_at=NOW() WHERE id=%s",
             (submission["central_property_id"],),
         )
+        db.central_event(submission["central_property_id"],"SOLD")
     await refresh_agency_channel_post(
         submission_id,
         "⛔️ این فایل دیگر موجود نیست.",
@@ -1388,6 +1397,9 @@ async def availability_price_text(update,context):
         if "current_price_billion" in pcols:
             assignments.append("current_price_billion=%s")
             params.append(new_price/1_000_000_000)
+        if "price_hashtag" in pcols:
+            assignments.append("price_hashtag=%s")
+            params.append(db.price_hashtag(new_price))
         if assignments:
             if "updated_at" in pcols:
                 assignments.append("updated_at=NOW()")
@@ -1396,6 +1408,7 @@ async def availability_price_text(update,context):
                 f"UPDATE properties SET {','.join(assignments)} WHERE id=%s",
                 params,
             )
+            db.central_event(submission["central_property_id"],"PRICE",submission.get("current_price_toman"))
 
     confirm_submission_availability(submission_id)
     await refresh_agency_channel_post(submission_id)
@@ -1428,10 +1441,11 @@ async def pause_unconfirmed_submission(hub_app,submission):
         (submission["id"],),
     )
     if submission.get("central_property_id"):
-        db.execute(
-            "UPDATE properties SET status='INACTIVE',updated_at=NOW() WHERE id=%s",
+        if db.one(
+            "UPDATE properties SET status='INACTIVE',updated_at=NOW() WHERE id=%s AND status='ACTIVE' RETURNING id",
             (submission["central_property_id"],),
-        )
+        ):
+            db.central_event(submission["central_property_id"],"STATUS")
     await refresh_agency_channel_post(
         submission["id"],
         "⏸ اعتبار فایل در انتظار تأیید مشاور است.",
@@ -1609,6 +1623,13 @@ async def tenant_supervisor(hub_app:Application):
         await asyncio.sleep(30)
 
 
+def central_queued(submission_id):
+    """Queue the file for the central channel; True when it is on its way."""
+    return central.queue(submission_id) or db.one(
+        """SELECT 1 FROM partner_publication_jobs WHERE submission_id=%s AND target_type='CENTRAL_CHANNEL'
+           AND status IN ('PENDING','PROCESSING','PUBLISHED')""",(submission_id,)) is not None
+
+
 async def publish_scheduled_job(job,hub_bot=None):
     s=db.one("SELECT * FROM partner_submissions WHERE id=%s",(job['submission_id'],))
     ch=db.one("SELECT * FROM partner_channel_connections WHERE id=%s AND is_active",(job['channel_connection_id'],))
@@ -1624,7 +1645,12 @@ async def schedule_worker(app:Application):
                 last_auto_queue=datetime.now(TEHRAN)
                 queued=ct.auto_queue_all()
                 if queued: log.info("agency channel auto-queue: files=%s",queued)
+                backlog=central.queue_backlog()
+                if backlog: log.info("central channel backlog queued: files=%s",backlog)
         except Exception: log.exception("agency channel auto-queue")
+        try:
+            await central.run_due(OWNER_ID,[app.bot],log)
+        except Exception: log.exception("central channel queue")
         try:
             # A paused agency schedule holds its queue.
             jobs=db.all_rows("""SELECT j.*,s.status AS submission_status FROM partner_publication_jobs j
@@ -1652,6 +1678,7 @@ async def schedule_worker(app:Application):
 async def post_init(app):
     db.ensure_partner_v2_schema()
     db.ensure_partner_v3_schema()
+    db.ensure_central_schema()
     await configure_blue_menu(app)
     asyncio.create_task(tenant_supervisor(app),name="tenant-supervisor")
     asyncio.create_task(schedule_worker(app),name="partner-schedule-worker")

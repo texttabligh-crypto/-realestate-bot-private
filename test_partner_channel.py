@@ -182,6 +182,7 @@ class DatabaseTest(unittest.TestCase):
         db.ensure_partner_v2_schema()
         db.ensure_partner_v3_schema()
         db.ensure_partner_v3_schema()  # idempotent at every start
+        db.ensure_central_schema()
         with self.connect() as conn:
             conn.execute("""
                 INSERT INTO partner_agencies (id, legal_name, brand_name, slug, manager_name, manager_phone, status)
@@ -273,6 +274,9 @@ class DatabaseTest(unittest.TestCase):
         with self.connect() as conn:
             self.assertEqual(conn.execute("SELECT status FROM partner_submissions WHERE id=2").fetchone()["status"], "DELETED")
             self.assertEqual(conn.execute("SELECT status FROM properties WHERE id=50").fetchone()["status"], "INACTIVE")
+            # ShahFile's bot is told to take its own post down too.
+            self.assertEqual(conn.execute("SELECT property_id, event_type FROM partner_central_events").fetchone(),
+                             {"property_id": 50, "event_type": "DELETED"})
             self.assertEqual(conn.execute("SELECT status FROM partner_publication_jobs WHERE submission_id=2").fetchone()["status"], "CANCELLED")
         self.assertEqual([r["id"] for r in self.ct.unpublished_files(6)], [])  # 1 is queued, 2 deleted
 
@@ -320,7 +324,8 @@ def load_app():
     stubs = {
         "telegram": types.SimpleNamespace(
             Bot=lambda token: ("bot", token), BotCommand=lambda *a: a, InlineKeyboardButton=Button,
-            InlineKeyboardMarkup=lambda rows: rows, MenuButtonCommands=lambda: None, Update=object),
+            InlineKeyboardMarkup=lambda rows: rows, MenuButtonCommands=lambda: None, Update=object,
+            InputMediaPhoto=InputMediaPhoto),
         "telegram.constants": types.SimpleNamespace(ParseMode=types.SimpleNamespace(HTML="HTML")),
         "telegram.error": types.SimpleNamespace(TelegramError=TelegramError),
         "telegram.ext": types.SimpleNamespace(

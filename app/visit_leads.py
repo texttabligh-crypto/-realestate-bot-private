@@ -969,6 +969,113 @@ def _find_source_by_identity(
             return cur.fetchone()
 
 
+def _partner_source_context(
+    property_id: int,
+):
+    """
+    The agency behind a file it added through the partner hub, so the
+    visit team knows whom to call: agency, agent and phone, its tracking
+    code and its own channel post.
+    """
+
+    try:
+        with _db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        s.tracking_code,
+                        a.brand_name,
+                        a.manager_phone,
+                        m.display_name,
+                        m.phone,
+                        post.channel_username,
+                        post.telegram_channel_id,
+                        post.telegram_message_id
+                    FROM partner_submissions s
+                    JOIN partner_agencies a
+                      ON a.id = s.agency_id
+                    LEFT JOIN partner_members m
+                      ON m.id = s.submitted_by_member_id
+                    LEFT JOIN LATERAL (
+                        SELECT
+                            c.channel_username,
+                            c.telegram_channel_id,
+                            j.telegram_message_id
+                        FROM partner_publication_jobs j
+                        JOIN partner_channel_connections c
+                          ON c.id = j.channel_connection_id
+                        WHERE j.submission_id = s.id
+                          AND j.target_type = 'AGENCY_CHANNEL'
+                          AND j.status = 'PUBLISHED'
+                        ORDER BY j.published_at DESC NULLS LAST, j.id DESC
+                        LIMIT 1
+                    ) post ON TRUE
+                    WHERE s.central_property_id = %s
+                    ORDER BY s.id DESC
+                    LIMIT 1
+                    """,
+                    (property_id,),
+                )
+
+                row = cur.fetchone()
+
+    except psycopg.Error:
+        return None
+
+    if not row:
+        return None
+
+    (
+        tracking_code,
+        brand_name,
+        manager_phone,
+        agent_name,
+        agent_phone,
+        channel_username,
+        telegram_channel_id,
+        message_id,
+    ) = row
+
+    contact = " – ".join(
+        str(value)
+        for value in (agent_name, agent_phone or manager_phone)
+        if value
+    )
+    username = _clean_source_username(
+        channel_username
+    )
+    direct_post_url = (
+        _direct_source_post_url(
+            None,
+            username,
+            telegram_channel_id,
+            message_id,
+        )
+        if message_id
+        else None
+    )
+
+    return {
+        "kind": "PARTNER",
+        "source_name": (
+            f"همکار «{brand_name}»"
+            + (f" ({contact})" if contact else "")
+        ),
+        "source_username": username,
+        "source_unit_code": tracking_code,
+        "source_message_id": message_id,
+        "source_chat_id": telegram_channel_id,
+        "source_is_active": bool(direct_post_url),
+        "direct_post_url": direct_post_url,
+        "channel_url": (
+            f"https://t.me/{username}"
+            if username
+            else None
+        ),
+    }
+
+
 def get_operator_source_context(
     property_id: int,
 ):
@@ -1018,6 +1125,14 @@ def get_operator_source_context(
     )
 
     source_kind = row[1]
+
+    if source_kind == "PARTNER":
+        partner = _partner_source_context(
+            property_id
+        )
+
+        if partner:
+            return partner
 
     username = None
 

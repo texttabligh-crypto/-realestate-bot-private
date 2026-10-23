@@ -10347,6 +10347,8 @@ async def post_init(application):
     start_footer_bulk_refresh_worker(application)
     start_scheduler(application)
     start_deleted_posts_watcher(application)
+    # Agencies' deletes, sales and price changes reach our channel posts.
+    application.bot_data['partner_events'] = asyncio.create_task(partner_central_events_loop(application))
     start_destination_public_price_watcher(application)
     start_source_deleted_posts_watcher(application)
     start_explicit_source_feature_repair(application)
@@ -12723,6 +12725,133 @@ async def notify_manual_channel_removals(
                     owner_chat_id,
                 )
                 break
+
+
+PARTNER_EVENTS_INTERVAL_SECONDS = 60
+PARTNER_EVENT_MAX_ATTEMPTS = 5
+
+
+def pending_partner_central_events(limit=10):
+    """
+    What agencies changed on their files in our channel (the partner hub
+    writes these): deleted, sold, a new price, paused or active again.
+    """
+
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT e.id, e.property_id, e.event_type, e.old_price_toman
+                    FROM partner_central_events e
+                    JOIN properties p ON p.id = e.property_id
+                    WHERE e.processed_at IS NULL
+                      AND p.source_kind = 'PARTNER'
+                    ORDER BY e.id
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+                return cur.fetchall()
+    except psycopg.errors.UndefinedTable:
+        # The partner hub has not created the table yet.
+        return []
+
+
+def finish_partner_central_event(event_id, error_text=None):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE partner_central_events
+                SET attempts = attempts + 1,
+                    last_error = %s,
+                    processed_at = CASE
+                        WHEN %s::text IS NULL OR attempts + 1 >= %s THEN NOW()
+                    END
+                WHERE id = %s
+                """,
+                (error_text, error_text, PARTNER_EVENT_MAX_ATTEMPTS, event_id),
+            )
+            conn.commit()
+
+
+async def apply_partner_central_event(
+    bot,
+    property_id,
+    event_type,
+    old_price_toman=None,
+):
+    """Bring our channel post of an agency file in line with the agency."""
+
+    if event_type == "DELETED":
+        try:
+            await force_delete_property(bot, property_id)
+        except ChannelPostTooOldToDelete:
+            await retire_listing_kept_in_channel(bot, property_id)
+            await notify_manual_channel_removals(bot, [property_id])
+        return
+
+    if event_type == "SOLD":
+        mark_property_sold(property_id)
+        await refresh_published_property_post(bot, property_id)
+        await queue_targeted_category_sync(bot, [property_id], reason="partner-sold")
+        return
+
+    if event_type == "PRICE":
+        await refresh_published_property_post(bot, property_id)
+        await sync_categories_for_price_change(
+            bot,
+            property_id,
+            old_price_toman,
+            _get_property_current_price_toman(property_id),
+        )
+        return
+
+    # STATUS: paused for an unanswered availability check, or active again.
+    await queue_targeted_category_sync(bot, [property_id], reason="partner-availability")
+
+
+async def run_partner_central_events_tick(application):
+    for event_id, property_id, event_type, old_price_toman in pending_partner_central_events():
+        try:
+            await apply_partner_central_event(
+                application.bot,
+                property_id,
+                event_type,
+                old_price_toman,
+            )
+        except RetryAfter as exc:
+            logging.warning("PARTNER listing sync paused by Telegram flood control: %s", exc)
+            break
+        except Exception as exc:
+            logging.exception(
+                "PARTNER listing sync failed: event=%s property_id=%s type=%s",
+                event_id,
+                property_id,
+                event_type,
+            )
+            finish_partner_central_event(event_id, str(exc)[:1000] or type(exc).__name__)
+            continue
+
+        finish_partner_central_event(event_id)
+        logging.info(
+            "PARTNER listing synced: event=%s property_id=%s type=%s",
+            event_id,
+            property_id,
+            event_type,
+        )
+
+
+async def partner_central_events_loop(application):
+    while True:
+        try:
+            await asyncio.sleep(PARTNER_EVENTS_INTERVAL_SECONDS)
+            await run_partner_central_events_tick(application)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("Unhandled PARTNER listing sync error")
 
 
 async def force_delete_property(
