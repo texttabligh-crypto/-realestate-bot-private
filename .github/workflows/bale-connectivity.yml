@@ -1,0 +1,30 @@
+name: Bale Connectivity
+
+# Phase 0 of the Bale (بله) bot: can the production server reach Bale's bot
+# API at all? Uses no token and changes nothing on the server.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Reach Bale from the production server
+    runs-on: [self-hosted, Linux, X64, nimatmelk-production]
+    timeout-minutes: 3
+
+    steps:
+      - name: Call Bale's bot API with a dummy token
+        shell: bash
+        run: |
+          body="$(mktemp)"
+          for url in "https://tapi.bale.ai/botTEST/getMe" "https://tapi.bale.ai/" "https://web.bale.ai/"; do
+            code="$(curl -sS -o "$body" -w '%{http_code} in %{time_total}s' -m 20 "$url" 2>&1 || true)"
+            echo "BALE_REACH $url -> $code"
+            head -c 300 "$body" | tr '\n' ' '
+            echo
+          done
+          rm -f "$body"
+          echo "A JSON answer such as {\"ok\":false,...} from tapi.bale.ai means the server can reach Bale."

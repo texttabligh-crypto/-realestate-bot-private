@@ -74,6 +74,7 @@ from unit_scenario import (
     handle_unit_scenario_button,
     handle_unit_scenario_text,
 )
+from bale_check import run_bale_check
 from daily_backup import (
     DB_BACKUP_ACTION,
     handle_backup_button,
@@ -10337,6 +10338,8 @@ async def post_init(application):
     start_visit_reminder_worker(application)
     start_visit_notification_worker(application)
     start_daily_backup_worker(application)
+    # Phase 0 of the Bale bot: logs whether Bale's API works from this server.
+    application.bot_data['bale_check'] = asyncio.create_task(run_bale_check())
     async def delayed_search_watch():
         await asyncio.sleep(12)
         start_search_watch_worker(application)
