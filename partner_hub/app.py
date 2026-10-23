@@ -385,8 +385,18 @@ def field_prompt(st):
     return f"مرحله {st['step']+1} از {len(FIELDS)}\n{label} را وارد کنید:",M(kb)
 
 
+FORM_CALLBACKS=("pf_skip","pf_photos_done","pf_no_photos","pf_submit")
+SAVED_FILE_CALLBACKS=("pf_own_now","pf_own_schedule","pf_own_slot","pf_central")
+
+
 async def property_callback(q,context,a,mem):
     st=context.user_data
+    # A restart empties the form; an old button must not crash the bot.
+    stale_form=(a.startswith("ptype_") or a.startswith("deal_") or a in FORM_CALLBACKS) and "data" not in st
+    stale_file=a in SAVED_FILE_CALLBACKS and not st.get("saved_submission_id")
+    if stale_form or stale_file:
+        context.user_data.clear()
+        await q.edit_message_text("⌛️ این فرم منقضی شده (ربات به‌روز شد).\nلطفاً دوباره از «➕ ثبت فایل جدید» شروع کنید؛ فایل‌هایی که قبلاً ثبت شدن توی «🏠 فایل‌های من» هستن.",reply_markup=home_keyboard(mem)); return
     if a.startswith("ptype_"):
         st['data']['property_type']=a.replace("ptype_",""); st['step']=1
         await q.edit_message_text("نوع معامله:",reply_markup=M([[B(x,callback_data=f"deal_{v}")] for x,v in DEAL_KEYS.items()])); return
@@ -1128,7 +1138,16 @@ async def agency_stats(q,mem):
     await q.edit_message_text(f"📊 آمار بنگاه\n\nکل فایل‌ها: {r['total']}\nفایل فعال: {r['active']}\nثبت این ماه: {r['month']}\nانتشار موفق: {pubs['n']}",reply_markup=M([[B("⬅️",callback_data="home")]]))
 
 
+async def on_error(update,context):
+    log.error("partner update failed",exc_info=context.error)
+    try:
+        message=getattr(update,"effective_message",None)
+        if message: await message.reply_text("⚠️ مشکلی پیش اومد؛ لطفاً دوباره از /menu امتحان کنید.")
+    except Exception: pass
+
+
 def add_handlers(app):
+    app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start",start)); app.add_handler(CommandHandler("menu",menu))
     app.add_handler(CallbackQueryHandler(on_callback)); app.add_handler(MessageHandler(filters.PHOTO,handle_photo)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,handle_text))
 
@@ -1622,7 +1641,9 @@ async def schedule_worker(app:Application):
                 try:
                     ids=await publish_scheduled_job(job,app.bot)
                     ct.record_publication(job['submission_id'],job['channel_connection_id'],ids,job_id=job['id'])
+                    log.info("agency channel post published: job=%s submission=%s messages=%s",job['id'],job['submission_id'],ids)
                 except Exception as exc:
+                    log.warning("agency channel post failed: job=%s submission=%s attempt=%s error=%s",job['id'],job['submission_id'],job['attempts']+1,exc)
                     db.execute("UPDATE partner_publication_jobs SET status=CASE WHEN attempts>=5 THEN 'FAILED' ELSE 'SCHEDULED' END,last_error=%s,scheduled_for=NOW()+interval '5 minutes',updated_at=NOW() WHERE id=%s",(str(exc)[:2000],job['id']))
         except Exception: log.exception("schedule worker cycle")
         await asyncio.sleep(20)

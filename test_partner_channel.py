@@ -299,6 +299,9 @@ class WiringTest(unittest.TestCase):
         self.assertIn("AND COALESCE(ps.is_active,TRUE)", app)
         self.assertNotIn("InputMediaPhoto(m['telegram_file_id']", app)
         self.assertIn("queued=ct.auto_queue_all()", app)
+        self.assertIn('log.info("agency channel post published:', app)
+        self.assertIn('log.warning("agency channel post failed:', app)
+        self.assertIn("    app.add_error_handler(on_error)\n", app)
         # Posting now or at a chosen time replaces a queued post.
         self.assertEqual(app.count("ct.cancel_queued("), 3)
 
@@ -404,6 +407,15 @@ class ScreensTest(unittest.TestCase):
         q = Query()
         asyncio.run(self.app.delete_file(q, advisor, "pdel_2"))
         self.assertEqual(q.alerts, ["اجازه حذف این فایل را ندارید."])
+
+    def test_an_old_form_button_after_a_restart(self):
+        q = Query()
+        context = types.SimpleNamespace(user_data={})
+        with mock.patch.object(self.app, "home_keyboard", lambda mem, owner=False: "home"):
+            asyncio.run(self.app.property_callback(q, context, "pf_photos_done", self.mem))
+            self.assertTrue(q.edits[-1][0].startswith("⌛️ این فرم منقضی شده"))
+            asyncio.run(self.app.property_callback(q, context, "pf_own_now", self.mem))
+            self.assertTrue(q.edits[-1][0].startswith("⌛️ این فرم منقضی شده"))
 
     def test_slot_times_are_saved(self):
         saved = []
