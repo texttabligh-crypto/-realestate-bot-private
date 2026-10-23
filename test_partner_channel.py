@@ -119,11 +119,11 @@ class PublishingTest(unittest.TestCase):
         self.assertEqual(asyncio.run(self.ct.send_listing(agency, -100, "x", [], [hub])), [100])
 
     def test_caption_fits_a_photo(self):
-        long_notes = {"tracking_code": "A6-1", "district": "نصر", "address_text": "x", "area_m2": 151,
-                      "deal_type": "SALE", "special_notes": "خیلی " * 400}
+        long_notes = {"tracking_code": "A6-1", "unit_code": "10015", "district": "نصر", "address_text": "x",
+                      "area_m2": 151, "deal_type": "SALE", "special_notes": "خیلی " * 400}
         caption = self.ct.fit_caption(long_notes, {"display_name": "پاشا ملک"})
         self.assertLessEqual(len(caption), 1024)
-        self.assertIn("A6-1", caption)
+        self.assertIn("کد واحد: 10015", caption)
         self.assertIn("پاشا ملک", caption)
         self.assertNotIn("خیلی", caption)
 

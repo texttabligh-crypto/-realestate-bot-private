@@ -136,6 +136,8 @@ async def publish_submission(submission, connection, readers=()):
     bot = agency_bot(submission["agency_id"])
     if bot is None or connection is None:
         raise RuntimeError("ربات یا کانال بنگاه متصل نیست.")
+    if not submission.get("unit_code"):
+        submission = {**submission, "unit_code": db.assign_unit_code(submission["id"])}
     media = db.all_rows(
         "SELECT * FROM partner_submission_media WHERE submission_id=%s ORDER BY position",
         (submission["id"],),
