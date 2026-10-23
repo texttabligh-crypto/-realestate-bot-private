@@ -486,4 +486,6 @@ async def delete_submission(submission):
     if submission.get("central_property_id"):
         db.execute("UPDATE properties SET status='INACTIVE', updated_at=NOW() WHERE id=%s",
                    (submission["central_property_id"],))
+        # ShahFile's bot takes its own channel post down too.
+        db.central_event(submission["central_property_id"], "DELETED")
     return {"deleted_posts": len(jobs) - len(kept), "kept_posts": len(kept)}

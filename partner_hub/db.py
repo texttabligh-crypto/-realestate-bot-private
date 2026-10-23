@@ -169,13 +169,50 @@ def ensure_partner_v3_schema():
         c.commit()
 
 
-def push_to_central(submission_id, actor_telegram_id):
+def _feature(value):
+    """«دارد» / «ندارد» typed by the agent -> True / False (None when unclear)."""
+    text = str(value or "").strip()
+    if any(word in text for word in ("ندارد", "خیر", "نیست")): return False
+    if any(word in text for word in ("دارد", "بله", "هست")): return True
+    return None
+
+
+def price_hashtag(price_toman):
+    """ShahFile's price hashtag, e.g. «#آپارتمان_12_13» for 12.5 billion."""
+    if not price_toman: return None
+    lower = int(price_toman / 1_000_000_000)
+    return f"#آپارتمان_{lower}_{lower + 1}"
+
+
+PUBLIC_TEXT_FIELDS = (
+    ("district", "منطقه"), ("address_text", "آدرس"), ("area_m2", "متراژ"), ("bedrooms", "تعداد خواب"),
+    ("floor_text", "طبقه"), ("total_floors", "تعداد کل طبقات"), ("units_per_floor", "تعداد واحد در طبقه"),
+    ("build_year", "سال ساخت"), ("direction", "جهت"), ("parking_text", "پارکینگ"),
+    ("elevator_text", "آسانسور"), ("storage_text", "انباری"), ("deed_text", "سند"),
+    ("installations_text", "نصبیات / امکانات"),
+)
+# Shown in ShahFile's post like the details of a file staff add by hand.
+PUBLIC_ATTRIBUTES = (
+    ("total_floors", "تعداد کل طبقات", "total_floors", 40),
+    ("units_per_floor", "تعداد واحد در طبقه", "units_per_floor", 41),
+    ("deed", "سند", "deed_text", 70),
+    ("installations", "نصبیات / امکانات", "installations_text", 80),
+)
+
+
+def push_to_central(submission_id, actor_telegram_id, media=None, priority=100):
     """Create one central property safely across old/new schemas and enqueue it.
-    Private owner fields are deliberately never copied into public property text.
+
+    media is the photos as ShahFile's own bot stored them ({file_id, unique_id});
+    the agency's file ids belong to another bot and cannot be posted by it.
+    Private owner fields and the agent's free-text notes (which may carry the
+    agency's own contact) are never copied.
     """
-    s = one("SELECT * FROM partner_submissions WHERE id=%s FOR UPDATE", (submission_id,))
+    s = one("SELECT * FROM partner_submissions WHERE id=%s", (submission_id,))
     if not s: raise ValueError("submission not found")
     if s.get("central_property_id"): return s["central_property_id"]
+    media = list(media or [])
+    price_toman = s["current_price_toman"]
     pcols = table_columns("properties")
     values = {
         "property_type": s["property_type"], "district": s["district"],
@@ -185,25 +222,37 @@ def push_to_central(submission_id, actor_telegram_id):
         "build_year": s["build_year"], "direction": s["direction"],
         "parking_text": s["parking_text"], "elevator_text": s["elevator_text"],
         "storage_text": s["storage_text"], "deed_text": s["deed_text"],
-        "installations_text": s["installations_text"], "special_notes": s["special_notes"],
-        "current_price_toman": s["current_price_toman"],
-        "current_price_billion": (s["current_price_toman"] or 0) / 1_000_000_000,
+        "installations_text": s["installations_text"],
+        "has_parking": _feature(s["parking_text"]), "has_elevator": _feature(s["elevator_text"]),
+        "has_storage": _feature(s["storage_text"]),
+        "current_price_toman": price_toman,
+        "current_price_billion": (price_toman or 0) / 1_000_000_000,
+        "price_hashtag": price_hashtag(price_toman),
         "status": "ACTIVE", "source_kind": "PARTNER", "ingest_status": "MANUAL_READY",
-        "has_media": True,
-        "raw_text": f"ورودی همکار | کد {s['tracking_code']} | {s['district']} | {s['area_m2']} متر",
+        "has_media": bool(media),
+        "raw_text": "\n".join(
+            [f"ورودی همکار | کد {s['tracking_code']}"]
+            + [f"{label}: {s[key]}" for key, label in PUBLIC_TEXT_FIELDS if s.get(key) not in (None, "")]
+        ),
     }
     cols = [k for k,v in values.items() if k in pcols and v is not None]
     placeholders = ",".join(["%s"]*len(cols))
     with connect() as c, c.cursor() as cur:
         cur.execute(f"INSERT INTO properties({','.join(cols)}) VALUES({placeholders}) RETURNING id", [values[k] for k in cols])
         pid = cur.fetchone()["id"]
-        cur.execute("SELECT telegram_file_id,telegram_file_unique_id,position FROM partner_submission_media WHERE submission_id=%s ORDER BY position", (submission_id,))
-        for media in cur.fetchall():
+        for position, photo in enumerate(media, 1):
             cur.execute("""INSERT INTO property_media(property_id,telegram_file_id,telegram_file_unique_id,media_type,position)
                            VALUES(%s,%s,%s,'PHOTO',%s) ON CONFLICT DO NOTHING""",
-                        (pid,media['telegram_file_id'],media['telegram_file_unique_id'],media['position']))
+                        (pid, photo["file_id"], photo["unique_id"], position))
+        cur.execute("SELECT to_regclass('property_attributes') IS NOT NULL AS ok")
+        if cur.fetchone()["ok"]:
+            for key, label, field, order in PUBLIC_ATTRIBUTES:
+                if s.get(field) not in (None, ""):
+                    cur.execute("""INSERT INTO property_attributes(property_id,attribute_key,attribute_label,attribute_value,display_order,is_visible)
+                                   VALUES(%s,%s,%s,%s,%s,TRUE) ON CONFLICT DO NOTHING""",
+                                (pid, key, label, str(s[field]), order))
         qcols = table_columns("publish_queue")
-        qvalues = {"property_id":pid,"queue_status":"READY","priority":100,"queue_source":"PARTNER","queued_by_user_id":None}
+        qvalues = {"property_id":pid,"queue_status":"READY","priority":priority,"queue_source":"PARTNER","queued_by_user_id":None}
         qc = [k for k,v in qvalues.items() if k in qcols and v is not None]
         cur.execute(f"INSERT INTO publish_queue({','.join(qc)}) VALUES({','.join(['%s']*len(qc))})", [qvalues[k] for k in qc])
         cur.execute(
@@ -223,5 +272,39 @@ def push_to_central(submission_id, actor_telegram_id):
             (pid,actor_telegram_id,submission_id),
         )
         c.commit()
-    audit("CENTRAL_QUEUE_CREATED",actor_telegram_id,s["agency_id"],"SUBMISSION",submission_id,{"property_id":pid})
+    audit("CENTRAL_QUEUE_CREATED",actor_telegram_id,s["agency_id"],"SUBMISSION",submission_id,{"property_id":pid,"photos":len(media)})
     return pid
+
+
+def ensure_central_schema():
+    """Idempotent: what the agency changes on a file ShahFile's bot must follow."""
+    with connect() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS partner_central_events (
+                id BIGSERIAL PRIMARY KEY,
+                property_id BIGINT NOT NULL,
+                event_type VARCHAR(20) NOT NULL
+                  CHECK (event_type IN ('DELETED','SOLD','PRICE','STATUS')),
+                old_price_toman BIGINT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                processed_at TIMESTAMPTZ
+            )
+            """
+        )
+        cur.execute(
+            """CREATE INDEX IF NOT EXISTS partner_central_events_pending
+               ON partner_central_events(id) WHERE processed_at IS NULL"""
+        )
+        c.commit()
+
+
+def central_event(property_id, event_type, old_price_toman=None):
+    """Tell ShahFile's bot to bring its channel post in line with the agency's change."""
+    if property_id:
+        execute(
+            "INSERT INTO partner_central_events(property_id,event_type,old_price_toman) VALUES(%s,%s,%s)",
+            (property_id, event_type, old_price_toman),
+        )
