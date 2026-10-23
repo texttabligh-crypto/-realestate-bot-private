@@ -598,6 +598,153 @@ td code { white-space: nowrap; }
 }
 .foot img { width: 42px; height: 42px; border-radius: 8px; background: #000; padding: 4px; object-fit: contain; }
 
+/* ---------- Print / PDF ---------- */
+
+@media print {
+  @page {
+    size: A4;
+    margin: 14mm 13mm 16mm;
+  }
+
+  :root {
+    --bg: #ffffff;
+    --surface: #ffffff;
+    --surface-2: #f6f3ec;
+    --fg: #17150f;
+    --fg-soft: #55503f;
+    --fg-faint: #7d7767;
+    --line: #ded8ca;
+    --line-soft: #ece6da;
+    --gold: #8a6c1c;
+    --gold-deep: #6d5411;
+    --gold-wash: #faf3de;
+    --gold-line: #e2cf9c;
+    --ink: #14120c;
+    --ink-fg: #f4efe3;
+    --ok: #2a6b43;
+    --warn: #8a5809;
+    --danger: #97332b;
+    color-scheme: light;
+  }
+
+  html, body {
+    background: #fff !important;
+    color: #17150f !important;
+    font-size: 10.5pt;
+    line-height: 1.75;
+    padding: 0 !important;
+  }
+
+  /* The rail becomes a table of contents at the top of page 1. */
+  .shell {
+    display: block !important;
+    padding-top: 0 !important;
+  }
+  .rail {
+    position: static !important;
+    max-height: none !important;
+    overflow: visible !important;
+    border: 1px solid #ded8ca !important;
+    border-radius: 8px;
+    padding: 12px 16px !important;
+    margin: 0 0 8mm !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .rail h2 { color: #8a6c1c !important; margin-bottom: 8px !important; }
+  .rail ol {
+    columns: 3;
+    column-gap: 18px;
+    font-size: 9pt;
+  }
+  .rail a {
+    color: #44402f !important;
+    font-size: 9pt;
+    break-inside: avoid;
+  }
+
+  .masthead {
+    padding-block: 8mm 7mm !important;
+    border-radius: 0 !important;
+  }
+  .masthead h1 { font-size: 21pt !important; }
+  .masthead .lede { font-size: 10pt !important; }
+  .brand { width: 70px !important; height: 70px !important; }
+  .meta-row { margin-top: 10px !important; }
+
+  section { margin-bottom: 8mm !important; break-inside: auto; }
+  h2 {
+    break-after: avoid;
+    page-break-after: avoid;
+    font-size: 14pt !important;
+  }
+  h3, .card-title {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+  .sec-head { break-after: avoid; page-break-after: avoid; }
+
+  .card, .feature, .note, .steps > li {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .card { box-shadow: none !important; padding: 12px 14px !important; }
+  .feature { box-shadow: none !important; padding: 12px 14px !important; }
+
+  /* Every section starts on a fresh sheet so nothing is cut in half. */
+  section + section { break-before: page; page-break-before: always; }
+
+  .mockwrap {
+    grid-template-columns: 1fr !important;
+    gap: 14px !important;
+    padding: 14px !important;
+    background: #f6f3ec !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .phone {
+    max-width: 250px !important;
+    box-shadow: none !important;
+    animation: none !important;
+  }
+
+  .tablewrap {
+    break-inside: auto;
+    box-shadow: none !important;
+    overflow: visible !important;
+    max-width: 100% !important;
+  }
+  table {
+    min-width: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    table-layout: fixed;
+    font-size: 8.6pt;
+  }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; page-break-inside: avoid; }
+  th, td {
+    padding: 6px 7px !important;
+    overflow-wrap: anywhere;
+    word-break: normal;
+  }
+  /* Keep a literal code token on one line, but let Persian labels wrap
+     rather than overflow the sheet. */
+  th:first-child, td:first-child { width: 30%; }
+  td code { white-space: nowrap; }
+  td { line-height: 1.6; }
+
+  .note { break-inside: avoid; page-break-inside: avoid; }
+
+  .foot {
+    break-before: page;
+    page-break-before: always;
+    border-top: 1px solid #ded8ca;
+  }
+  .foot img { background: #000 !important; }
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .phone { animation: rise .5s ease both; }
   @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
