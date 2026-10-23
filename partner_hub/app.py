@@ -7,13 +7,14 @@ import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import Bot, BotCommand, InlineKeyboardButton as B, InlineKeyboardMarkup as M, InputMediaPhoto, MenuButtonCommands, Update
+from telegram import Bot, BotCommand, InlineKeyboardButton as B, InlineKeyboardMarkup as M, MenuButtonCommands, Update
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
+import channel_tools as ct
 import db
-from formatter import public_caption
+from formatter import fa, money
 from security import decrypt_token, encrypt_token, token_fingerprint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
@@ -122,6 +123,8 @@ def home_keyboard(member=None, owner=False):
                 B("🎨 برند و وایت‌لیبل",callback_data="p_brand"),
                 B("🔌 اتصال ربات و کانال",callback_data="p_connect"),
             ])
+        if can_publish(member):
+            rows.append([B("⏰ زمان‌بندی ارسال به کانال",callback_data="p_sched")])
         team_stats=[]
         if member["role"]=="AGENCY_OWNER" or member.get("can_manage_team"):
             team_stats.append(B("👥 تیم و دعوت",callback_data="p_team"))
@@ -172,7 +175,14 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
         await begin_property(q,context); return
     if a.startswith("pf_") or a.startswith("ptype_") or a.startswith("deal_"):
         await property_callback(q,context,a,mem); return
-    if a=="p_files": await list_files(q,mem); return
+    if a=="p_files" or a.startswith("p_files_"):
+        await list_files(q,mem,int(a.rsplit("_",1)[1]) if a.startswith("p_files_") else 0); return
+    if a.startswith("pfile_"): await show_file(q,mem,int(a.rsplit("_",1)[1])); return
+    if a.startswith("pfsend_") or a.startswith("pfslot_"):
+        await send_file_to_channel(q,mem,int(a.rsplit("_",1)[1]),queue=a.startswith("pfslot_")); return
+    if a.startswith("pdel_") or a.startswith("pdelok_"): await delete_file(q,mem,a); return
+    if a in ("pback","pbackok"): await backfill_files(q,mem,a=="pbackok"); return
+    if a=="p_sched" or a.startswith("psched_"): await schedule_callback(q,context,a,mem); return
     if a=="p_brand":
         if not (mem["role"]=="AGENCY_OWNER" or mem.get("can_manage_brand")):
             await q.answer("دسترسی مدیریت برند ندارید.",show_alert=True); return
@@ -207,6 +217,7 @@ async def handle_text(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if flow=="connect_bot": await connect_bot_text(update,context); return
     if flow=="connect_channel": await connect_channel_text(update,context); return
     if flow=="schedule": await schedule_text(update,context); return
+    if flow=="slot_times": await slot_times_text(update,context); return
     if flow=="availability_price": await availability_price_text(update,context); return
     await update.message.reply_text("از منوی اصلی انتخاب کنید.",reply_markup=home_keyboard(db.member(update.effective_user.id),update.effective_user.id==OWNER_ID))
 
@@ -399,6 +410,15 @@ async def property_callback(q,context,a,mem):
         if not mem.get("can_publish_own"):
             await q.answer("دسترسی انتشار ندارید.",show_alert=True); return
         await publish_own(q,context,mem); return
+    if a=="pf_own_slot":
+        if not mem.get("can_publish_own"):
+            await q.answer("دسترسی زمان‌بندی ندارید.",show_alert=True); return
+        ch=ct.default_channel(mem['agency_id'])
+        if not ch: await q.answer("ابتدا کانال بنگاه را متصل کنید.",show_alert=True); return
+        ct.cancel_queued(st['saved_submission_id'])
+        planned=ct.queue_files(mem['agency_id'],[st['saved_submission_id']],ch['id'])
+        db.audit("AGENCY_PUBLICATION_SCHEDULED",q.from_user.id,mem['agency_id'],"SUBMISSION",st['saved_submission_id'],{"scheduled_for":planned[0][1].isoformat()})
+        await q.edit_message_text(f"✅ فایل در نوبت کانال قرار گرفت: {ct.when_label(planned[0][1])}",reply_markup=M([[B("⬅️ منو",callback_data="home")]])); return
     if a=="pf_own_schedule":
         if not mem.get("can_publish_own"):
             await q.answer("دسترسی زمان‌بندی ندارید.",show_alert=True); return
@@ -474,39 +494,27 @@ async def save_submission(q,context,mem):
     context.user_data['saved_submission_id']=sid; db.audit("SUBMISSION_CREATED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid,{"tracking_code":code})
     own=db.one("SELECT id FROM partner_channel_connections WHERE agency_id=%s AND is_active AND is_default LIMIT 1",(mem['agency_id'],))
     rows=[]
+    auto=""
     if own and mem['can_publish_own']:
         rows.append([B("🚀 انتشار فوری",callback_data="pf_own_now"),B("🗓 زمان‌بندی",callback_data="pf_own_schedule")])
+        slot=ct.plan_times(mem['agency_id'],1)
+        rows.append([B(f"⏰ نوبت بعدی کانال ({ct.when_label(slot[0])})",callback_data="pf_own_slot")])
+    if own and ct.agency_bot(mem['agency_id']):
+        auto="\n⏰ اگه انتخابی نکنید، چند دقیقهٔ دیگه خودکار توی نوبت کانال بنگاه قرار می‌گیره."
     rows += [[B("🌐 ارسال برای کانال مرکزی",callback_data="pf_central")],[B("✅ فعلاً تمام",callback_data="pf_done")]]
     warning=f"\n\n⚠️ مشابه فایل {duplicate['tracking_code']} تشخیص داده شد؛ مدیر مرکزی هنگام بررسی آن را می‌بیند." if duplicate else ""
-    await q.edit_message_text(f"✅ فایل ثبت شد.\nکد پیگیری: {code}{warning}\n\nمقصد انتشار را انتخاب کنید:",reply_markup=M(rows))
+    await q.edit_message_text(f"✅ فایل ثبت شد.\nکد پیگیری: {code}{warning}\n\nمقصد انتشار را انتخاب کنید:{auto}",reply_markup=M(rows))
 
 
 async def publish_own(q,context,mem):
     sid=context.user_data['saved_submission_id']; s=db.one("SELECT * FROM partner_submissions WHERE id=%s AND agency_id=%s",(sid,mem['agency_id']))
-    conn=db.one("SELECT * FROM partner_channel_connections WHERE agency_id=%s AND is_active AND is_default LIMIT 1",(mem['agency_id'],)); bc=db.one("SELECT * FROM partner_bot_connections WHERE agency_id=%s AND status='ACTIVE'",(mem['agency_id'],))
-    if not conn or not bc: await q.answer("ابتدا ربات و کانال بنگاه را متصل کنید.",show_alert=True); return
-    bot=Bot(decrypt_token(bc['encrypted_token'])); cap=public_caption(s,db.brand(mem['agency_id']))
-    media=db.all_rows("SELECT * FROM partner_submission_media WHERE submission_id=%s ORDER BY position",(sid,))
+    conn=ct.default_channel(mem['agency_id'])
+    if not conn or not ct.agency_bot(mem['agency_id']): await q.answer("ابتدا ربات و کانال بنگاه را متصل کنید.",show_alert=True); return
+    ct.cancel_queued(sid)
     try:
-        if media:
-            group=[InputMediaPhoto(m['telegram_file_id'],caption=cap if i==0 else None,parse_mode=ParseMode.HTML) for i,m in enumerate(media[:10])]
-            sent=await bot.send_media_group(conn['telegram_channel_id'],group); mid=sent[0].message_id
-        else: mid=(await bot.send_message(conn['telegram_channel_id'],cap,parse_mode=ParseMode.HTML)).message_id
-        db.execute("INSERT INTO partner_publication_jobs(submission_id,target_type,channel_connection_id,status,published_at,telegram_message_id) VALUES(%s,'AGENCY_CHANNEL',%s,'PUBLISHED',NOW(),%s)",(sid,conn['id'],mid))
-        db.execute(
-            """UPDATE partner_submissions
-               SET status='ACTIVE',
-                   last_availability_confirmed_at=NOW(),
-                   availability_check_due_at=NOW()+interval '3 days',
-                   availability_check_sent_at=NULL,
-                   availability_reminder_sent_at=NULL,
-                   availability_missed_cycles=0,
-                   availability_paused_at=NULL,
-                   updated_at=NOW()
-               WHERE id=%s""",
-            (sid,),
-        )
-        db.audit("AGENCY_CHANNEL_PUBLISHED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid,{"message_id":mid})
+        ids=await ct.publish_submission(s,conn,[context.bot])
+        ct.record_publication(sid,conn['id'],ids)
+        db.audit("AGENCY_CHANNEL_PUBLISHED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid,{"message_id":ids[0]})
         await q.edit_message_text("✅ با برند بنگاه در کانال خودتان منتشر شد.",reply_markup=M([[B("🌐 ارسال برای کانال مرکزی",callback_data="pf_central")],[B("⬅️ منو",callback_data="home")]]))
     except Exception as exc:
         db.audit("AGENCY_PUBLISH_FAILED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid,{"error":str(exc)})
@@ -539,6 +547,7 @@ async def schedule_text(update,context):
         if local<=now: raise ValueError("past")
         sid=context.user_data['saved_submission_id']; ch=db.one("SELECT id FROM partner_channel_connections WHERE agency_id=%s AND is_default AND is_active",(mem['agency_id'],))
         if not ch: raise ValueError("channel")
+        ct.cancel_queued(sid)
         db.execute("INSERT INTO partner_publication_jobs(submission_id,target_type,channel_connection_id,status,scheduled_for) VALUES(%s,'AGENCY_CHANNEL',%s,'SCHEDULED',%s)",(sid,ch['id'],local))
         db.audit("AGENCY_PUBLICATION_SCHEDULED",update.effective_user.id,mem['agency_id'],"SUBMISSION",sid,{"scheduled_for":local.isoformat()})
         context.user_data.clear(); await update.message.reply_text(f"✅ انتشار برای {local.strftime('%Y-%m-%d %H:%M')} زمان‌بندی شد.",reply_markup=home_keyboard(mem))
@@ -546,10 +555,154 @@ async def schedule_text(update,context):
         await update.message.reply_text("زمان قابل تشخیص نیست یا در گذشته است.\nمثال دقیق: فردا ۱۰:۳۰")
 
 
-async def list_files(q,mem):
-    rows=db.all_rows("SELECT tracking_code,district,area_m2,status FROM partner_submissions WHERE agency_id=%s ORDER BY id DESC LIMIT 20",(mem['agency_id'],))
-    text="🏠 آخرین فایل‌های بنگاه\n\n"+("\n".join(f"• {r['tracking_code']} | {r['district']} | {r['area_m2']}متر | {r['status']}" for r in rows) or "فایلی ثبت نشده.")
-    await q.edit_message_text(text,reply_markup=M([[B("⬅️",callback_data="home")]]))
+def can_publish(mem):
+    return bool(mem) and (mem["role"] in ("AGENCY_OWNER","AGENCY_ADMIN") or bool(mem.get("can_publish_own")))
+
+
+def area_label(value):
+    try: return fa(int(float(value)))
+    except (TypeError, ValueError): return fa(value or "-")
+
+
+async def list_files(q,mem,page=0):
+    rows=db.all_rows("""SELECT id,tracking_code,district,area_m2,status FROM partner_submissions
+                        WHERE agency_id=%s AND status<>'DELETED' ORDER BY id DESC LIMIT 11 OFFSET %s""",(mem['agency_id'],page*10))
+    kb=[[B(f"{r['tracking_code']} | {r['district']} | {area_label(r['area_m2'])}م | {ct.STATUS_LABELS.get(r['status'],r['status'])}",callback_data=f"pfile_{r['id']}")] for r in rows[:10]]
+    nav=[]
+    if page: nav.append(B("⬅️ قبلی",callback_data=f"p_files_{page-1}"))
+    if len(rows)>10: nav.append(B("بعدی ➡️",callback_data=f"p_files_{page+1}"))
+    if nav: kb.append(nav)
+    if can_publish(mem) and ct.default_channel(mem['agency_id']) and ct.agency_bot(mem['agency_id']):
+        pending=len(ct.unpublished_files(mem['agency_id']))
+        if pending: kb.append([B(f"📤 ارسال {fa(pending)} فایل منتشرنشده به کانال",callback_data="pback")])
+    kb.append([B("⬅️ منو",callback_data="home")])
+    text="🏠 فایل‌های بنگاه\n\nروی هر فایل بزنید تا جزئیات، ارسال به کانال یا حذفش رو ببینید." if rows else "🏠 فایل‌های بنگاه\n\nفایلی ثبت نشده."
+    await q.edit_message_text(text,reply_markup=M(kb))
+
+
+def own_file(mem,sid):
+    s=db.one("SELECT * FROM partner_submissions WHERE id=%s AND agency_id=%s",(sid,mem['agency_id']))
+    return s if s and s['status']!='DELETED' else None
+
+
+async def show_file(q,mem,sid,note=None):
+    s=own_file(mem,sid)
+    if not s: await q.edit_message_text("این فایل پیدا نشد.",reply_markup=M([[B("⬅️ فایل‌ها",callback_data="p_files")]])); return
+    state,when=ct.channel_state(sid)
+    channel={"published":"✅ منتشر شده","scheduled":f"🗓 در نوبت: {ct.when_label(when)}" if when else "🗓 در نوبت"}.get(state,"❌ هنوز منتشر نشده")
+    text=(f"🧾 {s['tracking_code']}\n📍 {s['district']} | {area_label(s['area_m2'])} متر\n💰 {money(s.get('current_price_toman'))}\n"
+          f"وضعیت: {ct.STATUS_LABELS.get(s['status'],s['status'])}\nکانال بنگاه: {channel}")
+    if note: text=f"{note}\n\n{text}"
+    kb=[]
+    if state is None and s['status'] in ct.PUBLISHABLE_STATUSES and can_publish(mem):
+        slot=ct.plan_times(mem['agency_id'],1)[0]
+        kb.append([B("🚀 انتشار فوری",callback_data=f"pfsend_{sid}"),B(f"⏰ نوبت بعدی ({ct.when_label(slot)})",callback_data=f"pfslot_{sid}")])
+    if availability_authorized(mem,s):
+        kb.append([B("🗑 حذف فایل",callback_data=f"pdel_{sid}")])
+    kb.append([B("⬅️ فایل‌ها",callback_data="p_files")])
+    await q.edit_message_text(text,reply_markup=M(kb))
+
+
+async def send_file_to_channel(q,mem,sid,queue=False):
+    s=own_file(mem,sid); ch=ct.default_channel(mem['agency_id'])
+    if not s or not can_publish(mem): await q.answer("اجازه ارسال این فایل را ندارید.",show_alert=True); return
+    if not ch or not ct.agency_bot(mem['agency_id']): await q.answer("ابتدا ربات و کانال بنگاه را متصل کنید.",show_alert=True); return
+    if ct.channel_state(sid)[0]: await show_file(q,mem,sid); return
+    if queue:
+        planned=ct.queue_files(mem['agency_id'],[sid],ch['id'])
+        db.audit("AGENCY_PUBLICATION_SCHEDULED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid,{"scheduled_for":planned[0][1].isoformat()})
+        await show_file(q,mem,sid,f"✅ در نوبت کانال قرار گرفت: {ct.when_label(planned[0][1])}"); return
+    try:
+        ids=await ct.publish_submission(s,ch)
+        ct.record_publication(sid,ch['id'],ids)
+        db.audit("AGENCY_CHANNEL_PUBLISHED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid,{"message_id":ids[0]})
+        await show_file(q,mem,sid,"✅ در کانال بنگاه منتشر شد.")
+    except Exception as exc:
+        db.audit("AGENCY_PUBLISH_FAILED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid,{"error":str(exc)})
+        await show_file(q,mem,sid,"❌ انتشار انجام نشد: "+str(exc)[:300])
+
+
+async def delete_file(q,mem,a):
+    sid=int(a.rsplit("_",1)[1]); s=own_file(mem,sid)
+    if not s or not availability_authorized(mem,s):
+        await q.answer("اجازه حذف این فایل را ندارید.",show_alert=True); return
+    if a.startswith("pdel_"):
+        await q.edit_message_text(
+            f"⚠️ فایل {s['tracking_code']} حذف بشه؟\n\nاز فهرست فایل‌ها برداشته می‌شه و پستش از کانال بنگاه پاک می‌شه. "
+            "اگه تلگرام اجازهٔ پاک کردن نده (پست‌های قدیمی‌تر از ۴۸ ساعت)، زیر پست «این فایل دیگر موجود نیست» می‌خوره.",
+            reply_markup=M([[B("🗑 آره، حذف کن",callback_data=f"pdelok_{sid}")],[B("↩️ نه",callback_data=f"pfile_{sid}")]])); return
+    result=await ct.delete_submission(s)
+    db.audit("SUBMISSION_DELETED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid,result)
+    note="" if not result["kept_posts"] else "\nپست کانال قدیمی بود و پاک نشد؛ زیرش «دیگر موجود نیست» خورد."
+    await q.edit_message_text(f"✅ فایل {s['tracking_code']} حذف شد.{note}",reply_markup=M([[B("⬅️ فایل‌ها",callback_data="p_files")]]))
+
+
+async def backfill_files(q,mem,confirmed):
+    ch=ct.default_channel(mem['agency_id'])
+    if not can_publish(mem) or not ch or not ct.agency_bot(mem['agency_id']):
+        await q.answer("ابتدا ربات و کانال بنگاه را متصل کنید.",show_alert=True); return
+    files=ct.unpublished_files(mem['agency_id'])
+    if not files: await list_files(q,mem); return
+    if not confirmed:
+        times=ct.plan_times(mem['agency_id'],len(files))
+        how=f"طبق زمان‌بندی کانال، از {ct.when_label(times[0])} هر نوبت یکی ارسال می‌شه."
+        await q.edit_message_text(f"📤 {fa(len(files))} فایل هنوز توی کانال بنگاه منتشر نشده.\n\n{how}",
+                                  reply_markup=M([[B("✅ ارسال کن",callback_data="pbackok")],[B("⬅️ فایل‌ها",callback_data="p_files")]])); return
+    planned=ct.queue_files(mem['agency_id'],[f['id'] for f in files],ch['id'])
+    db.audit("AGENCY_BACKFILL_SCHEDULED",q.from_user.id,mem['agency_id'],"AGENCY",mem['agency_id'],{"count":len(planned)})
+    last=ct.when_label(planned[-1][1])
+    await q.edit_message_text(f"✅ {fa(len(planned))} فایل در نوبت کانال قرار گرفت؛ اولی {ct.when_label(planned[0][1])} و آخری {last}.",
+                              reply_markup=M([[B("⬅️ فایل‌ها",callback_data="p_files")]]))
+
+
+def schedule_text_view(agency_id):
+    settings=ct.schedule_settings(agency_id)
+    if settings["slot_times"]:
+        times="، ".join(fa(t) for t in settings["slot_times"])
+    else:
+        default=ct.default_slot_times(datetime.now(TEHRAN).weekday())
+        times="پیش‌فرض، هماهنگ با کانال شاه‌فایل"+(f" ({'، '.join(fa(t) for t in default)})" if default else "")
+    queued=db.one("""SELECT count(*) AS n, min(j.scheduled_for) AS first FROM partner_publication_jobs j
+                     JOIN partner_submissions s ON s.id=j.submission_id
+                     WHERE s.agency_id=%s AND j.target_type='AGENCY_CHANNEL' AND j.status='SCHEDULED'""",(agency_id,))
+    lines=["⏰ زمان‌بندی ارسال به کانال","",f"ساعت‌های ارسال: {times}",
+           f"وضعیت: {'✅ فعال' if settings['is_active'] else '⏸ متوقف'}",
+           f"در صف: {fa(queued['n'])} فایل"+(f" (بعدی: {ct.when_label(queued['first'])})" if queued['n'] and queued['first'] else ""),"",
+           "فایل‌هایی که به نوبت کانال می‌رن، هر کدوم توی اولین ساعت خالی منتشر می‌شن (هر ساعت یه فایل)."]
+    rows=[[B("✏️ تنظیم ساعت‌ها",callback_data="psched_set")],
+          [B("⏸ توقف ارسال" if settings['is_active'] else "▶️ ادامهٔ ارسال",callback_data="psched_toggle")]]
+    if settings["slot_times"]: rows.append([B("↩️ برگشت به زمان‌بندی پیش‌فرض",callback_data="psched_clear")])
+    rows.append([B("⬅️ منو",callback_data="home")])
+    return "\n".join(lines),M(rows)
+
+
+async def schedule_callback(q,context,a,mem):
+    if not can_publish(mem): await q.answer("دسترسی زمان‌بندی ندارید.",show_alert=True); return
+    aid=mem['agency_id']
+    if a=="psched_set":
+        context.user_data.clear(); context.user_data['flow']="slot_times"
+        await q.edit_message_text("ساعت‌های ارسال به کانال رو بفرستید، مثلاً:\n۱۰ ۱۴ ۱۸:۳۰ ۲۱\n\nهر روز توی همین ساعت‌ها، هر بار یه فایل از نوبت کانال منتشر می‌شه.",
+                                  reply_markup=M([[B("⬅️ انصراف",callback_data="p_sched")]])); return
+    if a=="psched_toggle":
+        settings=ct.schedule_settings(aid); active=not settings['is_active']; ct.save_schedule(aid,is_active=active)
+        if active: ct.reslot_overdue(aid)
+        db.audit("AGENCY_SCHEDULE_TOGGLED",q.from_user.id,aid,"AGENCY",aid,{"is_active":active})
+    if a=="psched_clear":
+        ct.save_schedule(aid,slot_times=[]); db.audit("AGENCY_SCHEDULE_CLEARED",q.from_user.id,aid,"AGENCY",aid)
+    text,kb=schedule_text_view(aid)
+    await q.edit_message_text(text,reply_markup=kb)
+
+
+async def slot_times_text(update,context):
+    mem=db.member(update.effective_user.id)
+    if not can_publish(mem): context.user_data.clear(); await update.message.reply_text("دسترسی زمان‌بندی ندارید."); return
+    times=ct.parse_slot_times(update.message.text)
+    if not times:
+        await update.message.reply_text("ساعت‌ها رو متوجه نشدم 🙏 مثلاً بفرستید: ۱۰ ۱۴ ۱۸:۳۰ ۲۱"); return
+    ct.save_schedule(mem['agency_id'],slot_times=times); context.user_data.clear()
+    db.audit("AGENCY_SCHEDULE_SET",update.effective_user.id,mem['agency_id'],"AGENCY",mem['agency_id'],{"slot_times":times})
+    text,kb=schedule_text_view(mem['agency_id'])
+    await update.message.reply_text("✅ ساعت‌ها ذخیره شد.\n\n"+text,reply_markup=kb)
 
 
 async def brand_menu(q,mem):
@@ -1058,9 +1211,9 @@ async def refresh_agency_channel_post(submission_id,note=None):
     )
     if not row:
         return
-    caption=public_caption(row,db.brand(row["agency_id"]))
+    caption=ct.fit_caption(row,db.brand(row["agency_id"]))
     if note:
-        caption+=f"\n\n{note}"
+        caption=(caption+f"\n\n{note}")[:ct.MEDIA_CAPTION_LIMIT]
     media=db.one(
         "SELECT id FROM partner_submission_media WHERE submission_id=%s LIMIT 1",
         (submission_id,),
@@ -1437,39 +1590,38 @@ async def tenant_supervisor(hub_app:Application):
         await asyncio.sleep(30)
 
 
-async def publish_scheduled_job(job):
-    s=db.one("SELECT * FROM partner_submissions WHERE id=%s",(job['submission_id'],)); aid=s['agency_id']
-    bc=db.one("SELECT * FROM partner_bot_connections WHERE agency_id=%s AND status='ACTIVE'",(aid,)); ch=db.one("SELECT * FROM partner_channel_connections WHERE id=%s AND is_active",(job['channel_connection_id'],))
-    if not bc or not ch: raise RuntimeError("active bot/channel connection not found")
-    bot=Bot(decrypt_token(bc['encrypted_token'])); cap=public_caption(s,db.brand(aid)); media=db.all_rows("SELECT * FROM partner_submission_media WHERE submission_id=%s ORDER BY position",(s['id'],))
-    if media:
-        sent=await bot.send_media_group(ch['telegram_channel_id'],[InputMediaPhoto(m['telegram_file_id'],caption=cap if i==0 else None,parse_mode=ParseMode.HTML) for i,m in enumerate(media[:10])]); return sent[0].message_id
-    return (await bot.send_message(ch['telegram_channel_id'],cap,parse_mode=ParseMode.HTML)).message_id
+async def publish_scheduled_job(job,hub_bot=None):
+    s=db.one("SELECT * FROM partner_submissions WHERE id=%s",(job['submission_id'],))
+    ch=db.one("SELECT * FROM partner_channel_connections WHERE id=%s AND is_active",(job['channel_connection_id'],))
+    if not ch: raise RuntimeError("active bot/channel connection not found")
+    return await ct.publish_submission(s,ch,[hub_bot] if hub_bot else [])
 
 
 async def schedule_worker(app:Application):
+    last_auto_queue=None
     while True:
         try:
-            jobs=db.all_rows("""SELECT * FROM partner_publication_jobs WHERE target_type='AGENCY_CHANNEL' AND status='SCHEDULED' AND scheduled_for<=NOW() ORDER BY scheduled_for,id LIMIT 10""")
+            if last_auto_queue is None or datetime.now(TEHRAN)-last_auto_queue>=timedelta(minutes=5):
+                last_auto_queue=datetime.now(TEHRAN)
+                queued=ct.auto_queue_all()
+                if queued: log.info("agency channel auto-queue: files=%s",queued)
+        except Exception: log.exception("agency channel auto-queue")
+        try:
+            # A paused agency schedule holds its queue.
+            jobs=db.all_rows("""SELECT j.*,s.status AS submission_status FROM partner_publication_jobs j
+                                JOIN partner_submissions s ON s.id=j.submission_id
+                                LEFT JOIN partner_publish_schedules ps ON ps.agency_id=s.agency_id
+                                WHERE j.target_type='AGENCY_CHANNEL' AND j.status='SCHEDULED' AND j.scheduled_for<=NOW()
+                                  AND COALESCE(ps.is_active,TRUE)
+                                ORDER BY j.scheduled_for,j.id LIMIT 10""")
             for job in jobs:
+                if job['submission_status'] not in ct.PUBLISHABLE_STATUSES:
+                    db.execute("UPDATE partner_publication_jobs SET status='CANCELLED',updated_at=NOW() WHERE id=%s AND status='SCHEDULED'",(job['id'],)); continue
                 locked=db.one("UPDATE partner_publication_jobs SET status='PROCESSING',attempts=attempts+1,updated_at=NOW() WHERE id=%s AND status='SCHEDULED' RETURNING id",(job['id'],))
                 if not locked: continue
                 try:
-                    mid=await publish_scheduled_job(job)
-                    db.execute("UPDATE partner_publication_jobs SET status='PUBLISHED',published_at=NOW(),telegram_message_id=%s,updated_at=NOW() WHERE id=%s",(mid,job['id']))
-                    db.execute(
-                        """UPDATE partner_submissions
-                           SET status='ACTIVE',
-                               last_availability_confirmed_at=NOW(),
-                               availability_check_due_at=NOW()+interval '3 days',
-                               availability_check_sent_at=NULL,
-                               availability_reminder_sent_at=NULL,
-                               availability_missed_cycles=0,
-                               availability_paused_at=NULL,
-                               updated_at=NOW()
-                           WHERE id=%s""",
-                        (job['submission_id'],),
-                    )
+                    ids=await publish_scheduled_job(job,app.bot)
+                    ct.record_publication(job['submission_id'],job['channel_connection_id'],ids,job_id=job['id'])
                 except Exception as exc:
                     db.execute("UPDATE partner_publication_jobs SET status=CASE WHEN attempts>=5 THEN 'FAILED' ELSE 'SCHEDULED' END,last_error=%s,scheduled_for=NOW()+interval '5 minutes',updated_at=NOW() WHERE id=%s",(str(exc)[:2000],job['id']))
         except Exception: log.exception("schedule worker cycle")
@@ -1478,6 +1630,7 @@ async def schedule_worker(app:Application):
 
 async def post_init(app):
     db.ensure_partner_v2_schema()
+    db.ensure_partner_v3_schema()
     await configure_blue_menu(app)
     asyncio.create_task(tenant_supervisor(app),name="tenant-supervisor")
     asyncio.create_task(schedule_worker(app),name="partner-schedule-worker")
