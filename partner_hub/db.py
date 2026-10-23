@@ -142,6 +142,33 @@ def ensure_partner_v2_schema():
         c.commit()
 
 
+def ensure_partner_v3_schema():
+    """Idempotent: deleting files, the agency posting schedule, album message ids."""
+    with connect() as c, c.cursor() as cur:
+        cur.execute("ALTER TABLE partner_submissions DROP CONSTRAINT IF EXISTS partner_submissions_status_check")
+        cur.execute(
+            """
+            ALTER TABLE partner_submissions
+            ADD CONSTRAINT partner_submissions_status_check
+            CHECK (status IN ('DRAFT','SUBMITTED','UNDER_REVIEW','APPROVED','REJECTED',
+                              'ACTIVE','SOLD','INACTIVE','DELETED'))
+            """
+        )
+        cur.execute("ALTER TABLE partner_submissions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ")
+        cur.execute("ALTER TABLE partner_publication_jobs ADD COLUMN IF NOT EXISTS telegram_message_ids BIGINT[]")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS partner_publish_schedules (
+                agency_id BIGINT PRIMARY KEY REFERENCES partner_agencies(id) ON DELETE CASCADE,
+                slot_times TEXT[] NOT NULL DEFAULT '{}',
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        c.commit()
+
+
 def push_to_central(submission_id, actor_telegram_id):
     """Create one central property safely across old/new schemas and enqueue it.
     Private owner fields are deliberately never copied into public property text.
