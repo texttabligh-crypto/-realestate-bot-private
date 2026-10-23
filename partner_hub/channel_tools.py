@@ -24,8 +24,13 @@ from security import decrypt_token
 TEHRAN = ZoneInfo("Asia/Tehran")
 MEDIA_CAPTION_LIMIT = 1024
 ALBUM_LIMIT = 10
-# Without a schedule, files queued together go out this far apart.
+# Without any schedule, files queued together go out this far apart.
 UNSCHEDULED_SPACING = timedelta(minutes=3)
+# A new file waits this long before it is queued on its own, so the agent
+# can still pick «انتشار فوری» or a time right after saving it.
+AUTO_QUEUE_DELAY = timedelta(minutes=10)
+# A file whose posts failed this often is not queued again on its own.
+AUTO_QUEUE_MAX_FAILURES = 2
 # Files that can still go to the agency channel.
 PUBLISHABLE_STATUSES = ("DRAFT", "SUBMITTED", "UNDER_REVIEW", "APPROVED", "ACTIVE")
 # Publishing must not take a file out of the central review queue.
@@ -236,14 +241,57 @@ def save_schedule(agency_id, **changes):
     return settings
 
 
+def default_slot_times(weekday):
+    """
+    ShahFile's own channel times for a weekday (0 = Monday), from its
+    schedule_windows: every interval from start to end, outside the pause.
+    """
+
+    try:
+        rows = db.all_rows(
+            """SELECT start_time, end_time, interval_minutes, pause_start, pause_end
+               FROM schedule_windows WHERE is_active = TRUE AND weekday = %s
+               ORDER BY start_time, id""",
+            (weekday,),
+        )
+    except Exception:
+        return []
+    times = set()
+    for row in rows:
+        start = row["start_time"].hour * 60 + row["start_time"].minute
+        end = row["end_time"].hour * 60 + row["end_time"].minute
+        if end <= start:
+            end = 24 * 60  # the part of an overnight window before midnight
+        pause = None
+        if row["pause_start"] is not None and row["pause_end"] is not None:
+            pause = (row["pause_start"].hour * 60 + row["pause_start"].minute,
+                     row["pause_end"].hour * 60 + row["pause_end"].minute)
+        step = max(1, int(row["interval_minutes"] or 60))
+        for minute in range(start, end, step):
+            if pause and pause[0] <= minute < pause[1]:
+                continue
+            times.add(f"{minute // 60:02d}:{minute % 60:02d}")
+    return sorted(times)
+
+
 def free_slots(slot_times, taken, now, count, days=60):
-    """The next count slot times after now that no queued post holds."""
+    """
+    The next count slot times after now that no queued post holds.
+    slot_times is a list of «HH:MM», or a function of the weekday.
+    """
 
     held = {moment.astimezone(TEHRAN).replace(second=0, microsecond=0) for moment in taken}
+    by_weekday = {}
     slots = []
     for day in range(days):
         date = (now + timedelta(days=day)).date()
-        for value in sorted(slot_times):
+        if callable(slot_times):
+            if date.weekday() not in by_weekday:
+                by_weekday[date.weekday()] = slot_times(date.weekday())
+            day_times = by_weekday[date.weekday()]
+        else:
+            day_times = slot_times
+        for value in sorted(day_times):
             hour, minute = map(int, value.split(":"))
             moment = datetime(date.year, date.month, date.day, hour, minute, tzinfo=TEHRAN)
             if moment > now + timedelta(minutes=1) and moment not in held:
@@ -265,13 +313,66 @@ def taken_slots(agency_id):
 
 
 def plan_times(agency_id, count, now=None):
-    """When count queued files would go out: the schedule's free slots, else a few minutes apart."""
+    """
+    When count queued files would go out: the agency's own times, else
+    ShahFile's channel times, else a few minutes apart.
+    """
 
     now = now or datetime.now(TEHRAN)
     settings = schedule_settings(agency_id)
-    if settings["slot_times"]:
-        return free_slots(settings["slot_times"], taken_slots(agency_id), now, count)
-    return [now + timedelta(minutes=1) + UNSCHEDULED_SPACING * index for index in range(count)]
+    times = settings["slot_times"] or default_slot_times
+    slots = free_slots(times, taken_slots(agency_id), now, count) if count else []
+    if len(slots) == count:
+        return slots
+    start = slots[-1] if slots else now
+    return slots + [start + timedelta(minutes=1) + UNSCHEDULED_SPACING * index
+                    for index in range(count - len(slots))]
+
+
+def cancel_queued(submission_id):
+    """Drop a file's queued channel post, e.g. before posting it right away."""
+
+    db.execute(
+        """UPDATE partner_publication_jobs SET status='CANCELLED', updated_at=NOW()
+           WHERE submission_id=%s AND target_type='AGENCY_CHANNEL' AND status='SCHEDULED'""",
+        (submission_id,),
+    )
+
+
+def auto_queue_all(now=None):
+    """
+    Queue every connected agency's files never posted to its channel, files
+    saved before this feature included; returns how many were queued.
+    """
+
+    now = now or datetime.now(TEHRAN)
+    agencies = db.all_rows(
+        """SELECT c.agency_id, c.id AS connection_id
+           FROM partner_channel_connections c
+           JOIN partner_bot_connections b ON b.agency_id=c.agency_id AND b.status='ACTIVE'
+           JOIN partner_agencies a ON a.id=c.agency_id AND a.status='ACTIVE'
+           WHERE c.is_default AND c.is_active AND COALESCE(a.own_publish_enabled, TRUE)"""
+    )
+    queued = 0
+    for agency in agencies:
+        failures = {
+            row["submission_id"]: row["n"]
+            for row in db.all_rows(
+                """SELECT j.submission_id, count(*) AS n FROM partner_publication_jobs j
+                   JOIN partner_submissions s ON s.id=j.submission_id
+                   WHERE s.agency_id=%s AND j.target_type='AGENCY_CHANNEL' AND j.status='FAILED'
+                   GROUP BY j.submission_id""",
+                (agency["agency_id"],),
+            )
+        }
+        files = [
+            row["id"] for row in unpublished_files(agency["agency_id"])
+            if row["created_at"] <= now - AUTO_QUEUE_DELAY
+            and failures.get(row["id"], 0) < AUTO_QUEUE_MAX_FAILURES
+        ]
+        if files:
+            queued += len(queue_files(agency["agency_id"], files, agency["connection_id"], now))
+    return queued
 
 
 def queue_files(agency_id, submission_ids, connection_id, now=None):

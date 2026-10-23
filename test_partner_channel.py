@@ -124,6 +124,7 @@ class PublishingTest(unittest.TestCase):
         caption = self.ct.fit_caption(long_notes, {"display_name": "پاشا ملک"})
         self.assertLessEqual(len(caption), 1024)
         self.assertIn("A6-1", caption)
+        self.assertIn("پاشا ملک", caption)
         self.assertNotIn("خیلی", caption)
 
     def test_album_ids_for_older_posts(self):
@@ -167,6 +168,15 @@ class DatabaseTest(unittest.TestCase):
         self.patch.start()
         with self.connect() as conn:
             conn.execute("CREATE TABLE properties (id BIGSERIAL PRIMARY KEY, status TEXT, updated_at TIMESTAMPTZ)")
+            # ShahFile's own channel schedule: hourly 10:30–22:00, paused 15:00–16:30, every day.
+            conn.execute("""
+                CREATE TABLE schedule_windows (
+                    id BIGSERIAL PRIMARY KEY, weekday INT, start_time TIME, end_time TIME,
+                    interval_minutes INT, max_posts INT, is_active BOOL DEFAULT TRUE,
+                    pause_start TIME, pause_end TIME);
+                INSERT INTO schedule_windows (weekday, start_time, end_time, interval_minutes, pause_start, pause_end)
+                SELECT d, '10:30', '22:00', 60, '15:00', '16:30' FROM generate_series(0, 6) d;
+            """)
             conn.execute((HUB / "migrations" / "001_partner_hub.sql").read_text(encoding="utf-8"))
             conn.commit()
         db.ensure_partner_v2_schema()
@@ -211,6 +221,36 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual(self.ct.schedule_settings(6), {"slot_times": ["10:00", "18:00"], "is_active": False})
         self.ct.save_schedule(6, slot_times=[])
         self.assertEqual(self.ct.schedule_settings(6)["slot_times"], [])
+
+    def test_the_default_schedule_is_shahfiles(self):
+        self.assertEqual(self.ct.default_slot_times(4), [
+            "10:30", "11:30", "12:30", "13:30", "14:30", "16:30", "17:30", "18:30", "19:30", "20:30", "21:30"])
+        now = datetime(2026, 10, 23, 21, 0, tzinfo=TEHRAN)
+        times = self.ct.plan_times(6, 3, now=now)
+        self.assertEqual([t.strftime("%d %H:%M") for t in times], ["23 21:30", "24 10:30", "24 11:30"])
+        # The agency's own times win.
+        self.ct.save_schedule(6, slot_times=["09:00"])
+        self.assertEqual([t.strftime("%d %H:%M") for t in self.ct.plan_times(6, 1, now=now)], ["24 09:00"])
+
+    def test_old_files_are_queued_on_their_own(self):
+        with self.connect() as conn:
+            conn.execute("""
+                INSERT INTO partner_bot_connections (agency_id, bot_id, encrypted_token, token_fingerprint)
+                VALUES (6, 1, 'x', 'y');
+                UPDATE partner_submissions SET created_at = NOW() - INTERVAL '1 day' WHERE id = 1;
+                UPDATE partner_submissions SET created_at = NOW() WHERE id = 2;
+            """)
+            conn.commit()
+        self.assertEqual(self.ct.auto_queue_all(), 1)  # 2 was just saved: the agent may still pick
+        self.assertEqual(self.ct.channel_state(1)[0], "scheduled")
+        self.assertEqual(self.ct.auto_queue_all(), 0)
+        self.ct.cancel_queued(1)
+        self.assertEqual(self.ct.channel_state(1), (None, None))
+        with self.connect() as conn:  # a file whose posts keep failing is left alone
+            conn.execute("""INSERT INTO partner_publication_jobs (submission_id, target_type, channel_connection_id, status)
+                            VALUES (1, 'AGENCY_CHANNEL', 9, 'FAILED'), (1, 'AGENCY_CHANNEL', 9, 'FAILED')""")
+            conn.commit()
+        self.assertEqual(self.ct.auto_queue_all(), 0)
 
     def test_publishing_keeps_a_file_in_central_review(self):
         self.ct.record_publication(1, 9, [301, 302])
@@ -258,6 +298,9 @@ class WiringTest(unittest.TestCase):
         self.assertIn("ids=await publish_scheduled_job(job,app.bot)", app)
         self.assertIn("AND COALESCE(ps.is_active,TRUE)", app)
         self.assertNotIn("InputMediaPhoto(m['telegram_file_id']", app)
+        self.assertIn("queued=ct.auto_queue_all()", app)
+        # Posting now or at a chosen time replaces a queued post.
+        self.assertEqual(app.count("ct.cancel_queued("), 3)
 
 
 if __name__ == "__main__":
@@ -317,6 +360,8 @@ class ScreensTest(unittest.TestCase):
             mock.patch.object(self.ct, "agency_bot", lambda aid: object()),
             mock.patch.object(self.ct, "unpublished_files", lambda aid: [self.file]),
             mock.patch.object(self.ct, "channel_state", lambda sid: (None, None)),
+            mock.patch.object(self.ct, "plan_times", lambda aid, count, now=None: [
+                datetime(2026, 10, 23, 18, 30, tzinfo=TEHRAN)] * count),
         ]
         for patch in self.patches:
             patch.start()
@@ -336,6 +381,8 @@ class ScreensTest(unittest.TestCase):
         text, rows = q.edits[-1]
         self.assertIn("کانال بنگاه: ❌ هنوز منتشر نشده", text)
         self.assertEqual([r[0].callback_data for r in rows], ["pfsend_2", "pdel_2", "p_files"])
+        self.assertEqual(rows[0][1].callback_data, "pfslot_2")
+        self.assertTrue(rows[0][1].text.startswith("⏰ نوبت بعدی ("))
 
     def test_delete_asks_first(self):
         q = Query()
