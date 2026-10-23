@@ -5,6 +5,8 @@ import secrets
 import psycopg
 from psycopg.rows import dict_row
 
+from formatter import price_hashtag
+
 
 def connect():
     return psycopg.connect(
@@ -177,11 +179,42 @@ def _feature(value):
     return None
 
 
-def price_hashtag(price_toman):
-    """ShahFile's price hashtag, e.g. «#آپارتمان_12_13» for 12.5 billion."""
-    if not price_toman: return None
-    lower = int(price_toman / 1_000_000_000)
-    return f"#آپارتمان_{lower}_{lower + 1}"
+def ensure_unit_code_schema():
+    """Idempotent: each agency numbers its files like ShahFile does (from 100)."""
+    with connect() as c, c.cursor() as cur:
+        cur.execute("ALTER TABLE partner_agencies ADD COLUMN IF NOT EXISTS unit_sequence INTEGER NOT NULL DEFAULT 99")
+        cur.execute("ALTER TABLE partner_submissions ADD COLUMN IF NOT EXISTS unit_code VARCHAR(30)")
+        cur.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS uq_partner_submission_unit_code
+               ON partner_submissions(agency_id, unit_code) WHERE unit_code IS NOT NULL"""
+        )
+        c.commit()
+
+
+def assign_unit_code(submission_id):
+    """
+    The file's unit code in its agency's channel, given once: the agency's
+    next number (100, 101, …) followed by the whole billions of the price,
+    like ShahFile's «40815» for its 408th file at 15 billion.
+    """
+    with connect() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT agency_id, unit_code, deal_type, current_price_toman FROM partner_submissions WHERE id=%s FOR UPDATE",
+            (submission_id,),
+        )
+        s = cur.fetchone()
+        if not s: raise ValueError("submission not found")
+        if s["unit_code"]: return s["unit_code"]
+        cur.execute(
+            "UPDATE partner_agencies SET unit_sequence=unit_sequence+1 WHERE id=%s RETURNING unit_sequence",
+            (s["agency_id"],),
+        )
+        code = str(cur.fetchone()["unit_sequence"])
+        if s["deal_type"] != "RENT" and s["current_price_toman"]:
+            code += str(int(int(s["current_price_toman"]) / 1_000_000_000))
+        cur.execute("UPDATE partner_submissions SET unit_code=%s WHERE id=%s", (code, submission_id))
+        c.commit()
+    return code
 
 
 PUBLIC_TEXT_FIELDS = (
@@ -231,7 +264,7 @@ def push_to_central(submission_id, actor_telegram_id, media=None, priority=100):
         "status": "ACTIVE", "source_kind": "PARTNER", "ingest_status": "MANUAL_READY",
         "has_media": bool(media),
         "raw_text": "\n".join(
-            [f"ورودی همکار | کد {s['tracking_code']}"]
+            [f"ورودی همکار | کد {s['tracking_code']}" + (f" | کد واحد بنگاه {s['unit_code']}" if s.get("unit_code") else "")]
             + [f"{label}: {s[key]}" for key, label in PUBLIC_TEXT_FIELDS if s.get(key) not in (None, "")]
         ),
     }

@@ -493,7 +493,7 @@ async def preview(q,context):
 async def save_submission(q,context,mem):
     d={k:(None if v==SKIP else v) for k,v in context.user_data['data'].items()}; code=db.tracking_code(mem['agency_id'])
     cols=[k for k,_,_ in FIELDS]
-    duplicate=db.one("""SELECT id,tracking_code FROM partner_submissions
+    duplicate=db.one("""SELECT id,tracking_code,unit_code FROM partner_submissions
       WHERE agency_id=%s AND owner_phone=%s AND district=%s
         AND ABS(area_m2-%s)<=2 AND status NOT IN('REJECTED','INACTIVE')
         AND created_at>NOW()-interval '180 days' ORDER BY id DESC LIMIT 1""",
@@ -506,6 +506,7 @@ async def save_submission(q,context,mem):
         for pos,p in enumerate(d.get('photos',[]),1): cur.execute("INSERT INTO partner_submission_media(submission_id,telegram_file_id,telegram_file_unique_id,position) VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING",(sid,p['file_id'],p['unique_id'],pos))
         c.commit()
     context.user_data['saved_submission_id']=sid; db.audit("SUBMISSION_CREATED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid,{"tracking_code":code})
+    unit_code=db.assign_unit_code(sid)
     own=db.one("SELECT id FROM partner_channel_connections WHERE agency_id=%s AND is_active AND is_default LIMIT 1",(mem['agency_id'],))
     rows=[]
     auto=""
@@ -519,8 +520,8 @@ async def save_submission(q,context,mem):
         db.audit("CENTRAL_QUEUED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid)
         auto+="\n🌐 برای کانال مرکزی هم خودکار در صف انتشار قرار گرفت."
     rows += [[B("✅ فعلاً تمام",callback_data="pf_done")]]
-    warning=f"\n\n⚠️ مشابه فایل {duplicate['tracking_code']} تشخیص داده شد؛ مدیر مرکزی هنگام بررسی آن را می‌بیند." if duplicate else ""
-    await q.edit_message_text(f"✅ فایل ثبت شد.\nکد پیگیری: {code}{warning}\n\nمقصد انتشار را انتخاب کنید:{auto}",reply_markup=M(rows))
+    warning=f"\n\n⚠️ مشابه فایل {file_code(duplicate)} تشخیص داده شد؛ مدیر مرکزی هنگام بررسی آن را می‌بیند." if duplicate else ""
+    await q.edit_message_text(f"✅ فایل ثبت شد.\nکد واحد: {unit_code}{warning}\n\nمقصد انتشار را انتخاب کنید:{auto}",reply_markup=M(rows))
 
 
 async def publish_own(q,context,mem):
@@ -582,9 +583,9 @@ def area_label(value):
 
 
 async def list_files(q,mem,page=0):
-    rows=db.all_rows("""SELECT id,tracking_code,district,area_m2,status FROM partner_submissions
+    rows=db.all_rows("""SELECT id,tracking_code,unit_code,district,area_m2,status FROM partner_submissions
                         WHERE agency_id=%s AND status<>'DELETED' ORDER BY id DESC LIMIT 11 OFFSET %s""",(mem['agency_id'],page*10))
-    kb=[[B(f"{r['tracking_code']} | {r['district']} | {area_label(r['area_m2'])}م | {ct.STATUS_LABELS.get(r['status'],r['status'])}",callback_data=f"pfile_{r['id']}")] for r in rows[:10]]
+    kb=[[B(f"{file_code(r)} | {r['district']} | {area_label(r['area_m2'])}م | {ct.STATUS_LABELS.get(r['status'],r['status'])}",callback_data=f"pfile_{r['id']}")] for r in rows[:10]]
     nav=[]
     if page: nav.append(B("⬅️ قبلی",callback_data=f"p_files_{page-1}"))
     if len(rows)>10: nav.append(B("بعدی ➡️",callback_data=f"p_files_{page+1}"))
@@ -597,6 +598,21 @@ async def list_files(q,mem,page=0):
     await q.edit_message_text(text,reply_markup=M(kb))
 
 
+def file_code(submission):
+    """What agents and customers call a file: its unit code (older rows: the tracking code)."""
+    return submission.get('unit_code') or submission['tracking_code']
+
+
+async def backfill_unit_codes():
+    """Files saved before unit codes get theirs, oldest first; live channel posts show it."""
+    rows=db.all_rows("SELECT id,status FROM partner_submissions WHERE unit_code IS NULL AND status<>'DELETED' ORDER BY id")
+    for row in rows:
+        db.assign_unit_code(row['id'])
+        if row['status'] in ct.PUBLISHABLE_STATUSES:
+            await refresh_agency_channel_post(row['id'])
+    return len(rows)
+
+
 def own_file(mem,sid):
     s=db.one("SELECT * FROM partner_submissions WHERE id=%s AND agency_id=%s",(sid,mem['agency_id']))
     return s if s and s['status']!='DELETED' else None
@@ -607,7 +623,7 @@ async def show_file(q,mem,sid,note=None):
     if not s: await q.edit_message_text("این فایل پیدا نشد.",reply_markup=M([[B("⬅️ فایل‌ها",callback_data="p_files")]])); return
     state,when=ct.channel_state(sid)
     channel={"published":"✅ منتشر شده","scheduled":f"🗓 در نوبت: {ct.when_label(when)}" if when else "🗓 در نوبت"}.get(state,"❌ هنوز منتشر نشده")
-    text=(f"🧾 {s['tracking_code']}\n📍 {s['district']} | {area_label(s['area_m2'])} متر\n💰 {money(s.get('current_price_toman'))}\n"
+    text=(f"🧾 کد واحد: {file_code(s)}\n📍 {s['district']} | {area_label(s['area_m2'])} متر\n💰 {money(s.get('current_price_toman'))}\n"
           f"وضعیت: {ct.STATUS_LABELS.get(s['status'],s['status'])}\nکانال بنگاه: {channel}")
     if note: text=f"{note}\n\n{text}"
     kb=[]
@@ -645,13 +661,13 @@ async def delete_file(q,mem,a):
         await q.answer("اجازه حذف این فایل را ندارید.",show_alert=True); return
     if a.startswith("pdel_"):
         await q.edit_message_text(
-            f"⚠️ فایل {s['tracking_code']} حذف بشه؟\n\nاز فهرست فایل‌ها برداشته می‌شه و پستش از کانال بنگاه پاک می‌شه. "
+            f"⚠️ فایل {file_code(s)} حذف بشه؟\n\nاز فهرست فایل‌ها برداشته می‌شه و پستش از کانال بنگاه پاک می‌شه. "
             "اگه تلگرام اجازهٔ پاک کردن نده (پست‌های قدیمی‌تر از ۴۸ ساعت)، زیر پست «این فایل دیگر موجود نیست» می‌خوره.",
             reply_markup=M([[B("🗑 آره، حذف کن",callback_data=f"pdelok_{sid}")],[B("↩️ نه",callback_data=f"pfile_{sid}")]])); return
     result=await ct.delete_submission(s)
     db.audit("SUBMISSION_DELETED",q.from_user.id,mem['agency_id'],"SUBMISSION",sid,result)
     note="" if not result["kept_posts"] else "\nپست کانال قدیمی بود و پاک نشد؛ زیرش «دیگر موجود نیست» خورد."
-    await q.edit_message_text(f"✅ فایل {s['tracking_code']} حذف شد.{note}",reply_markup=M([[B("⬅️ فایل‌ها",callback_data="p_files")]]))
+    await q.edit_message_text(f"✅ فایل {file_code(s)} حذف شد.{note}",reply_markup=M([[B("⬅️ فایل‌ها",callback_data="p_files")]]))
 
 
 async def backfill_files(q,mem,confirmed):
@@ -1197,7 +1213,7 @@ async def send_availability_prompt(hub_app,submission,reminder=False):
     prefix="🔔 یادآوری تأیید فایل" if reminder else "🏠 تأیید موجودی فایل"
     text=(
         f"{prefix}\n\n"
-        f"کد: {submission['tracking_code']}\n"
+        f"کد واحد: {file_code(submission)}\n"
         f"{submission['district']} | {submission['area_m2']} متر\n\n"
         "این فایل هنوز موجود است؟"
     )
@@ -1455,7 +1471,7 @@ async def pause_unconfirmed_submission(hub_app,submission):
         await bot.send_message(
             submission["telegram_user_id"],
             "⏸ چون دو نوبت به تأیید موجودی پاسخ داده نشد، "
-            f"فایل {submission['tracking_code']} موقتاً غیرفعال شد.\n"
+            f"فایل {file_code(submission)} موقتاً غیرفعال شد.\n"
             "اگر هنوز موجود است، آن را دوباره فعال کنید.",
             reply_markup=M([[
                 B(
@@ -1639,6 +1655,10 @@ async def publish_scheduled_job(job,hub_bot=None):
 
 async def schedule_worker(app:Application):
     last_auto_queue=None
+    try:
+        coded=await backfill_unit_codes()
+        if coded: log.info("agency unit codes given to older files: files=%s",coded)
+    except Exception: log.exception("agency unit code backfill")
     while True:
         try:
             if last_auto_queue is None or datetime.now(TEHRAN)-last_auto_queue>=timedelta(minutes=5):
@@ -1679,6 +1699,7 @@ async def post_init(app):
     db.ensure_partner_v2_schema()
     db.ensure_partner_v3_schema()
     db.ensure_central_schema()
+    db.ensure_unit_code_schema()
     await configure_blue_menu(app)
     asyncio.create_task(tenant_supervisor(app),name="tenant-supervisor")
     asyncio.create_task(schedule_worker(app),name="partner-schedule-worker")
