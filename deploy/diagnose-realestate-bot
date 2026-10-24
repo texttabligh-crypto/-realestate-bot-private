@@ -8,7 +8,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C.UTF-8
 
 TARGET="/opt/realestate-bot"
-ALL_CONTAINERS=(realestate_bot realestate_partner_hub realestate_postgres realestate_redis)
+ALL_CONTAINERS=(realestate_bot realestate_partner_hub realestate_bale_bot realestate_postgres realestate_redis)
 
 SERVICE="${1:-all}"
 LINES="${2:-200}"
@@ -18,12 +18,13 @@ SINCE="${3:-60m}"
 UNIT_CODES="${4:-}"
 
 case "${SERVICE}" in
-    all) LOG_CONTAINERS=(realestate_bot realestate_partner_hub) ;;
+    all) LOG_CONTAINERS=(realestate_bot realestate_partner_hub realestate_bale_bot) ;;
     bot) LOG_CONTAINERS=(realestate_bot) ;;
+    bale_bot) LOG_CONTAINERS=(realestate_bale_bot) ;;
     partner_hub) LOG_CONTAINERS=(realestate_partner_hub) ;;
     postgres) LOG_CONTAINERS=(realestate_postgres) ;;
     redis) LOG_CONTAINERS=(realestate_redis) ;;
-    *) echo "ERROR: service must be one of: all bot partner_hub postgres redis"; exit 2 ;;
+    *) echo "ERROR: service must be one of: all bot bale_bot partner_hub postgres redis"; exit 2 ;;
 esac
 
 if ! [[ "${LINES}" =~ ^[0-9]{1,4}$ ]] || (( LINES < 1 || LINES > 2000 )); then
